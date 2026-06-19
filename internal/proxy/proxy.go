@@ -1,0 +1,110 @@
+// Package proxy provides an HTTP reverse proxy that intercepts GraphQL
+// requests, parses them, evaluates firewall rules, and either forwards
+// or blocks the request.
+package proxy
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"strings"
+
+	"github.com/monch1962/gql-firewall/internal/parser"
+	"github.com/monch1962/gql-firewall/internal/rules"
+)
+
+// Evaluator is the interface for rule evaluation.
+type Evaluator interface {
+	Evaluate(info *parser.QueryInfo) (*rules.Result, error)
+}
+
+// graphQLBody represents the expected JSON body of a GraphQL HTTP request.
+type graphQLBody struct {
+	Query         string          `json:"query"`
+	OperationName string          `json:"operationName,omitempty"`
+	Variables     json.RawMessage `json:"variables,omitempty"`
+}
+
+// Handler is an HTTP handler that proxies GraphQL requests through a firewall.
+type Handler struct {
+	upstream    *httputil.ReverseProxy
+	upstreamURL *url.URL
+	evaluator   Evaluator
+}
+
+// New creates a new proxy handler that forwards to upstreamURL after
+// evaluating requests through the provided evaluator.
+func New(upstreamURL string, evaluator Evaluator) *Handler {
+	u, _ := url.Parse(upstreamURL)
+	return &Handler{
+		upstream:    httputil.NewSingleHostReverseProxy(u),
+		upstreamURL: u,
+		evaluator:   evaluator,
+	}
+}
+
+// ServeHTTP implements http.Handler.
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Only inspect POST requests to /graphql
+	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/graphql") {
+		h.handleGraphQL(w, r)
+		return
+	}
+
+	// Pass through all other requests
+	h.upstream.ServeHTTP(w, r)
+}
+
+func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
+	// Read and preserve the body for upstream forwarding
+	bodyBytes, err := io.ReadAll(r.Body)
+	r.Body.Close()
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error": "cannot read request body: %s"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	// Parse the GraphQL JSON body
+	var gqlReq graphQLBody
+	if err := json.Unmarshal(bodyBytes, &gqlReq); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error": "invalid JSON body: %s"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	if gqlReq.Query == "" {
+		http.Error(w, `{"error": "missing 'query' field in request body"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Parse the GraphQL query
+	queryInfo, err := parser.Parse(gqlReq.Query)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error": "invalid GraphQL query: %s"}`, err), http.StatusBadRequest)
+		return
+	}
+
+	// Evaluate rules
+	result, err := h.evaluator.Evaluate(queryInfo)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error": "rule evaluation error: %s"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	if !result.Allowed {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(w, `{"error": "request blocked", "reason": %q}`, result.Reason)
+		return
+	}
+
+	// Forward to upstream — restore the body
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	r.ContentLength = int64(len(bodyBytes))
+
+	proxy := httputil.NewSingleHostReverseProxy(h.upstreamURL)
+	proxy.ServeHTTP(w, r)
+}
