@@ -17,6 +17,7 @@ import (
 	"github.com/monch1962/gql-firewall/internal/metrics"
 	"github.com/monch1962/gql-firewall/internal/parser"
 	"github.com/monch1962/gql-firewall/internal/rules"
+	"github.com/monch1962/gql-firewall/internal/tenant"
 )
 
 // Evaluator is the interface for rule evaluation.
@@ -93,6 +94,11 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error": "invalid GraphQL query: %s"}`, err), http.StatusBadRequest)
 		metrics.RecordRequest("error", "unknown", time.Since(start))
 		return
+	}
+
+	// Extract tenant from X-API-Key header
+	if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
+		queryInfo.TenantID = tenant.ExtractTenantID(apiKey)
 	}
 
 	metrics.RecordRuleEval(fmt.Sprintf("op_%s", queryInfo.OperationType))

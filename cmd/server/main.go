@@ -19,6 +19,7 @@ import (
 	"github.com/monch1962/gql-firewall/internal/parser"
 	"github.com/monch1962/gql-firewall/internal/proxy"
 	"github.com/monch1962/gql-firewall/internal/rules"
+	"github.com/monch1962/gql-firewall/internal/tenant"
 )
 
 func main() {
@@ -86,12 +87,15 @@ func main() {
 		log.Printf("no OPA endpoint configured — using local rules only")
 	}
 
-	// Build the composite evaluator: local rules → caching OPA → schema
+	// Build the composite evaluator: local rules → tenant config → caching OPA → schema
+	tenantStore := tenant.New(rulesCfg)
+
 	evaluator := &compositeEvaluator{
-		local:    rulesCfg,
-		opa:      opaClient,
-		schema:   schemaDoc,
-		cacheTTL: *cacheTTL,
+		local:       rulesCfg,
+		tenants:     tenantStore,
+		opa:         opaClient,
+		schema:      schemaDoc,
+		cacheTTL:    *cacheTTL,
 	}
 
 	// Set up the admin API for live rule management
@@ -157,6 +161,62 @@ func startAdminAPI(addr string, eval *compositeEvaluator, configUpdates <-chan *
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
+	// GET /admin/tenants — lists all configured tenants
+	mux.HandleFunc("/admin/tenants", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if eval.tenants == nil {
+			json.NewEncoder(w).Encode([]string{})
+			return
+		}
+		json.NewEncoder(w).Encode(eval.tenants.List())
+	})
+
+	// PUT /admin/tenants/{id} — create or update a tenant's rules
+	mux.HandleFunc("/admin/tenants/", func(w http.ResponseWriter, r *http.Request) {
+		tenantID := r.URL.Path[len("/admin/tenants/"):]
+		if tenantID == "" {
+			http.Error(w, "tenant ID required", http.StatusBadRequest)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			if eval.tenants == nil {
+				json.NewEncoder(w).Encode(map[string]string{"error": "tenant store not available"})
+				return
+			}
+			cfg := eval.tenants.Get(tenantID)
+			json.NewEncoder(w).Encode(cfg)
+
+		case http.MethodPost, http.MethodPut:
+			var newCfg rules.Config
+			if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+				http.Error(w, fmt.Sprintf("invalid JSON: %s", err), http.StatusBadRequest)
+				return
+			}
+			if eval.tenants != nil {
+				eval.tenants.Set(tenantID, &newCfg)
+				metrics.ActiveTenants.Set(float64(eval.tenants.Count()))
+				log.Printf("admin API: tenant %q rules updated", tenantID)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+
+		case http.MethodDelete:
+			if eval.tenants != nil {
+				eval.tenants.Delete(tenantID)
+				metrics.ActiveTenants.Set(float64(eval.tenants.Count()))
+				log.Printf("admin API: tenant %q deleted", tenantID)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
 	// GET /admin/stats — returns runtime statistics
 	mux.HandleFunc("/admin/stats", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -168,6 +228,9 @@ func startAdminAPI(addr string, eval *compositeEvaluator, configUpdates <-chan *
 			eval.mu.RLock()
 			stats["cache_entries"] = len(eval.cache)
 			eval.mu.RUnlock()
+		}
+		if eval.tenants != nil {
+			stats["tenants"] = eval.tenants.Count()
 		}
 		json.NewEncoder(w).Encode(stats)
 	})
@@ -186,11 +249,12 @@ func startAdminAPI(addr string, eval *compositeEvaluator, configUpdates <-chan *
 	}()
 }
 
-// compositeEvaluator runs local rules first, then OPA with caching,
-// then schema validation. Thread-safe for live config reloads.
+// compositeEvaluator runs local rules first, then tenant-specific rules,
+// OPA with caching, then schema validation. Thread-safe for live config reloads.
 type compositeEvaluator struct {
 	mu       sync.RWMutex
 	local    *rules.Config
+	tenants  *tenant.Store
 	opa      *opa.Client
 	schema   *parser.SchemaInfo
 	cacheTTL time.Duration
@@ -205,10 +269,23 @@ type cachedDecision struct {
 func (c *compositeEvaluator) Evaluate(info *parser.QueryInfo) (*rules.Result, error) {
 	c.mu.RLock()
 	localCfg := c.local
+	tenants := c.tenants
 	schema := c.schema
 	opaClient := c.opa
 	cacheTTL := c.cacheTTL
 	c.mu.RUnlock()
+
+	// 0. Tenant-specific rules (overrides default config)
+	if tenants != nil {
+		tenantCfg := tenants.Get(info.TenantID)
+		if tenantCfg != nil {
+			result := tenantCfg.Evaluate(info)
+			if !result.Allowed {
+				metrics.RecordBlock(result.Reason)
+				return result, nil
+			}
+		}
+	}
 
 	// 1. Operation-name allowlist check (fast path)
 	if localCfg != nil && len(localCfg.AllowedOperations) > 0 {

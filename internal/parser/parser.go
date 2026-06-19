@@ -23,6 +23,8 @@ type QueryInfo struct {
 	FieldCount int `json:"field_count"`
 	// FieldPaths contains the dot-separated paths of all fields (e.g. "user.profile.email").
 	FieldPaths []string `json:"field_paths"`
+	// TenantID identifies the tenant for per-tenant policy isolation.
+	TenantID string `json:"tenant_id,omitempty"`
 }
 
 // SchemaInfo holds a compiled GraphQL schema for schema-aware validation.
