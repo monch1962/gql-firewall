@@ -46,6 +46,7 @@ gql-firewall's OPA Rego policies (35 tests) cover 12 attack categories — the m
 - **SDL schema-aware validation** — Accept a GraphQL schema file (`--schema`). Validates requested fields exist on Query type before forwarding.
 - **Live admin API** — View and update rules at runtime via REST API on `:8082`.
 - **Prometheus metrics** — `/metrics` endpoint with counters for requests, blocks, latency, rule evaluations, and OPA calls.
+- **Per-tenant policy isolation** — Each tenant (identified via `X-API-Key` header) can have its own rules configuration. Managed via admin API.
 - **Configurable hot-reload** — Watch rule files for changes or update via admin API — both apply without restart.
 
 ### Performance
@@ -206,6 +207,11 @@ The admin API runs on a separate port (`:8082` by default). Use it for live rule
 | `PUT /admin/rules/update` | POST/PUT | Update rules at runtime (accepts full `rules.Config` JSON) |
 | `GET /admin/stats` | GET | Returns runtime statistics (cache size, tenant count) |
 
+| `GET /admin/tenants` | GET | List all configured tenant IDs |
+| `GET /admin/tenants/{id}` | GET | Get a specific tenant's rules config |
+| `POST /admin/tenants/{id}` | POST/PUT | Create or update a tenant's rules |
+| `DELETE /admin/tenants/{id}` | DELETE | Remove a tenant's rules (falls back to default) |
+
 ```bash
 # View current rules
 curl http://localhost:8082/admin/rules
@@ -214,6 +220,17 @@ curl http://localhost:8082/admin/rules
 curl -X POST http://localhost:8082/admin/rules/update \
   -H "Content-Type: application/json" \
   -d '{"depth_limit": 5, "max_field_count": 50}'
+
+# Create tenant-specific rules (tenant ID extracted from "myapp_..." API key)
+curl -X PUT http://localhost:8082/admin/tenants/myapp \
+  -H "Content-Type: application/json" \
+  -d '{"depth_limit": 3}'
+
+# List tenants
+curl http://localhost:8082/admin/tenants
+
+# Delete tenant
+curl -X DELETE http://localhost:8082/admin/tenants/myapp
 
 # Health check
 curl http://localhost:8082/admin/health
@@ -295,6 +312,7 @@ gql-firewall/
 │   ├── metrics/                  # Prometheus instrumentation (5 tests)
 │   ├── opa/                      # OPA sidecar client (7 tests)
 │   ├── proxy/                    # HTTP reverse proxy (7 tests)
+│   ├── tenant/                   # Per-tenant rules isolation (7 tests)
 │   └── integration/              # End-to-end pipeline tests (9 tests)
 ├── rust-parser/                  # Rust hot-path parser (7 tests)
 │   ├── Cargo.toml
@@ -310,7 +328,7 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           60 tests  — parser, rules, config, metrics, opa client, proxy, integration
+Go:           67 tests  — parser, rules, config, metrics, opa client, tenant, proxy, integration
 Rust:          7 tests  — parsing, depth, fields, paths, mutations, errors
 OPA/Rego:     35 tests  — 12 attack categories, edge cases, combined rules
 Total:       102 tests  — all passing
