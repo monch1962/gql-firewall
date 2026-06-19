@@ -49,6 +49,11 @@ type opaResponse struct {
 	} `json:"result"`
 }
 
+// Configured returns true if an OPA endpoint was configured.
+func (c *Client) Configured() bool {
+	return c.endpoint != ""
+}
+
 // Evaluate sends query information to OPA and returns the decision.
 // Returns allow-by-default if OPA is not configured.
 func (c *Client) Evaluate(info *parser.QueryInfo) (*rules.Result, error) {

@@ -12,7 +12,9 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"time"
 
+	"github.com/monch1962/gql-firewall/internal/metrics"
 	"github.com/monch1962/gql-firewall/internal/parser"
 	"github.com/monch1962/gql-firewall/internal/rules"
 )
@@ -60,11 +62,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
 	// Read and preserve the body for upstream forwarding
 	bodyBytes, err := io.ReadAll(r.Body)
 	r.Body.Close()
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error": "cannot read request body: %s"}`, err), http.StatusBadRequest)
+		metrics.RecordRequest("error", "unknown", time.Since(start))
 		return
 	}
 
@@ -72,11 +77,13 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	var gqlReq graphQLBody
 	if err := json.Unmarshal(bodyBytes, &gqlReq); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error": "invalid JSON body: %s"}`, err), http.StatusBadRequest)
+		metrics.RecordRequest("error", "unknown", time.Since(start))
 		return
 	}
 
 	if gqlReq.Query == "" {
 		http.Error(w, `{"error": "missing 'query' field in request body"}`, http.StatusBadRequest)
+		metrics.RecordRequest("error", "unknown", time.Since(start))
 		return
 	}
 
@@ -84,13 +91,17 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	queryInfo, err := parser.Parse(gqlReq.Query)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error": "invalid GraphQL query: %s"}`, err), http.StatusBadRequest)
+		metrics.RecordRequest("error", "unknown", time.Since(start))
 		return
 	}
+
+	metrics.RecordRuleEval(fmt.Sprintf("op_%s", queryInfo.OperationType))
 
 	// Evaluate rules
 	result, err := h.evaluator.Evaluate(queryInfo)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error": "rule evaluation error: %s"}`, err), http.StatusInternalServerError)
+		metrics.RecordRequest("error", queryInfo.OperationType, time.Since(start))
 		return
 	}
 
@@ -98,6 +109,8 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		fmt.Fprintf(w, `{"error": "request blocked", "reason": %q}`, result.Reason)
+		metrics.RecordBlock(result.Reason)
+		metrics.RecordRequest("blocked", queryInfo.OperationType, time.Since(start))
 		return
 	}
 
@@ -105,6 +118,13 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	r.ContentLength = int64(len(bodyBytes))
 
+	// Use a response modifier to capture the upstream response status
+	modifier := func(resp *http.Response) error {
+		metrics.RecordRequest("allowed", queryInfo.OperationType, time.Since(start))
+		return nil
+	}
+
 	proxy := httputil.NewSingleHostReverseProxy(h.upstreamURL)
+	proxy.ModifyResponse = modifier
 	proxy.ServeHTTP(w, r)
 }
