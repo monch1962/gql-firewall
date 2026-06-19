@@ -2,3 +2,4 @@ server
 *.test
 *.out
 vendor/
+rust-parser/target/
