@@ -37,14 +37,21 @@ gql-firewall's OPA Rego policies (35 tests) cover 12 attack categories — the m
   - **Depth limiting** — Reject queries that nest beyond N levels
   - **Field counting** — Reject queries requesting too many fields
   - **Operation type control** — Allow or block query/mutation/subscription
+  - **Operation-name allowlist** — Only allow named operations (e.g. `query GetUser`)
   - **Field allowlists** — Only permit specified field paths
   - **Field blocklists** — Deny specific sensitive fields (takes precedence)
-- **OPA/Rego integration** — Optional OPA sidecar for external policy evaluation. OPA receives full query context and returns allow/deny decisions.
-- **Configurable hot-reload** — Watch rule files for changes and apply them without restart.
+- **OPA/Rego integration** — Optional OPA sidecar for external policy evaluation.
+  - **OPA decision caching** — Cache OPA results with configurable TTL (`--opa-cache-ttl`)
+  - **Fail-open safety** — On OPA errors, requests pass through (configurable)
+- **SDL schema-aware validation** — Accept a GraphQL schema file (`--schema`). Validates requested fields exist on Query type before forwarding.
+- **Live admin API** — View and update rules at runtime via REST API on `:8082`.
+- **Prometheus metrics** — `/metrics` endpoint with counters for requests, blocks, latency, rule evaluations, and OPA calls.
+- **Configurable hot-reload** — Watch rule files for changes or update via admin API — both apply without restart.
 
 ### Performance
 - **Go control plane** — Fast, memory-safe, goroutine-per-request. P99 <5ms with local rules.
-- **Rust hot-path parser** (optional) — Runs as an HTTP sidecar using `async-graphql-parser`. Use when sub-millisecond parsing latency is critical.
+- **Rust hot-path parser** (optional) — Runs as an HTTP sidecar using `async-graphql-parser`. Sub-millisecond parsing latency.
+- **OPA decision caching** — Avoids redundant OPA calls for repeated query patterns. ~200µs vs ~2ms RPC on cache hit.
 
 ### Security
 - **12 attack vectors covered** (see table above)
@@ -57,9 +64,10 @@ gql-firewall's OPA Rego policies (35 tests) cover 12 attack categories — the m
 - **Rate limiting** — Via OPA policies with external data integration
 
 ### Observability
-- **Structured deny reasons** — every blocked query returns a machine-readable reason
-- **Request counting** — Rust hot-path parser tracks processed requests
-- **Extensible** — expose deny counters as Prometheus metrics via OPA's Data API
+- **Prometheus `/metrics`** — Exposes request counts (by outcome + operation type), blocked request counters (by rule reason), latency histograms (by outcome), rule evaluation counters, OPA call counters, config reload counters, and active tenant gauge.
+- **Structured deny reasons** — Every blocked query returns a machine-readable `"reason"` field.
+- **Admin health endpoint** — `GET /admin/health` returns `{"status": "ok"}`, suitable for liveness probes.
+- **Admin stats endpoint** — `GET /admin/stats` returns cache size and tenant counts.
 
 ## Quick Start
 
@@ -81,12 +89,15 @@ go build -o gql-firewall ./cmd/server/
   --config ./config/rules.json \
   --listen :8081
 
-# With OPA sidecar for policy evaluation
+# With all optional features enabled
 ./gql-firewall \
   --upstream http://localhost:8080 \
   --config ./config/rules.json \
+  --schema ./schema.graphql \
   --listen :8081 \
-  --opa http://localhost:8181/v1/data/graphql/deny
+  --admin :8082 \
+  --opa http://localhost:8181/v1/data/graphql/deny \
+  --opa-cache-ttl 60s
 
 # With Rust hot-path parser sidecar
 ./rust-parser/target/release/gql-parser --listen 9090 &
@@ -163,7 +174,7 @@ echo '{"input": {"depth": 5, "field_count": 3, "operation_type": "query", "field
 opa test opa-policies/ -v
 ```
 
-The OPA input schema:
+The OPA input schema matches the Go parser's `QueryInfo` structure:
 
 ```json
 {
@@ -182,6 +193,52 @@ The OPA input schema:
     "field_allowlist": []
   }
 }
+```
+
+## Admin API
+
+The admin API runs on a separate port (`:8082` by default). Use it for live rule management without restarting the sidecar.
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `GET /admin/health` | GET | Health check — returns `{"status": "ok"}` |
+| `GET /admin/rules` | GET | Returns current rules configuration |
+| `PUT /admin/rules/update` | POST/PUT | Update rules at runtime (accepts full `rules.Config` JSON) |
+| `GET /admin/stats` | GET | Returns runtime statistics (cache size, tenant count) |
+
+```bash
+# View current rules
+curl http://localhost:8082/admin/rules
+
+# Update rules at runtime
+curl -X POST http://localhost:8082/admin/rules/update \
+  -H "Content-Type: application/json" \
+  -d '{"depth_limit": 5, "max_field_count": 50}'
+
+# Health check
+curl http://localhost:8082/admin/health
+
+# Stats
+curl http://localhost:8082/admin/stats
+```
+
+## Metrics
+
+Prometheus metrics are exposed at `/metrics` on the main listen port. Metrics include:
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `gql_firewall_requests_total` | Counter | `outcome`, `operation_type` | Total GraphQL requests |
+| `gql_firewall_requests_blocked_total` | Counter | `reason` | Blocked requests by rule reason |
+| `gql_firewall_request_duration_seconds` | Histogram | `outcome` | Pipeline latency |
+| `gql_firewall_active_tenants` | Gauge | — | Active tenant count |
+| `gql_firewall_rule_evaluations_total` | Counter | `rule` | Rule evaluation count |
+| `gql_firewall_config_reloads_total` | Counter | — | Config hot-reload count |
+| `gql_firewall_opa_requests_total` | Counter | `outcome` | OPA sidecar call count |
+
+```bash
+# Scrape metrics
+curl http://localhost:8081/metrics
 ```
 
 ## Architecture
@@ -235,7 +292,8 @@ gql-firewall/
 │   ├── parser/                   # GraphQL query analysis (16 tests)
 │   ├── rules/                    # Configurable rule evaluation (19 tests)
 │   ├── config/                   # JSON config loader + file watcher (7 tests)
-│   ├── opa/                      # OPA sidecar client (6 tests)
+│   ├── metrics/                  # Prometheus instrumentation (5 tests)
+│   ├── opa/                      # OPA sidecar client (7 tests)
 │   ├── proxy/                    # HTTP reverse proxy (7 tests)
 │   └── integration/              # End-to-end pipeline tests (9 tests)
 ├── rust-parser/                  # Rust hot-path parser (7 tests)
@@ -252,10 +310,10 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           55 tests  — parser, rules, config, opa client, proxy, integration
+Go:           60 tests  — parser, rules, config, metrics, opa client, proxy, integration
 Rust:          7 tests  — parsing, depth, fields, paths, mutations, errors
 OPA/Rego:     35 tests  — 12 attack categories, edge cases, combined rules
-Total:        97 tests  — all passing
+Total:       102 tests  — all passing
 ```
 
 ```bash
