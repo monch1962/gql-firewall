@@ -2,6 +2,8 @@
 package main
 
 import (
+	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -22,21 +24,25 @@ import (
 	"github.com/monch1962/gql-firewall/internal/tenant"
 )
 
+const version = "0.3.0"
+
 func main() {
 	var (
-		listenAddr      = flag.String("listen", ":8081", "Address to listen on")
-		upstreamURL     = flag.String("upstream", "http://localhost:8080", "Upstream GraphQL server URL")
-		configPath      = flag.String("config", "config/rules.json", "Path to rules configuration JSON file")
-		opaEndpoint     = flag.String("opa", "", "OPA sidecar endpoint (optional)")
-		schemaPath      = flag.String("schema", "", "Path to GraphQL SDL schema file (optional)")
-		configReload    = flag.Bool("watch", true, "Watch config file for hot-reload")
-		adminListenAddr = flag.String("admin", ":8082", "Admin API listen address (set to empty to disable)")
-		cacheTTL        = flag.Duration("opa-cache-ttl", 60*time.Second, "TTL for cached OPA decisions (0 = disabled)")
+		listenAddr       = flag.String("listen", ":8081", "Address to listen on")
+		upstreamURL      = flag.String("upstream", "http://localhost:8080", "Upstream GraphQL server URL")
+		configPath       = flag.String("config", "config/rules.json", "Path to rules configuration JSON file")
+		opaEndpoint      = flag.String("opa", "", "OPA sidecar endpoint (optional)")
+		schemaPath       = flag.String("schema", "", "Path to GraphQL SDL schema file (optional)")
+		adminListenAddr  = flag.String("admin", ":8082", "Admin API listen address (set to empty to disable)")
+		adminToken       = flag.String("admin-token", "", "Required bearer token for admin API (C-1 fix)")
+		cacheTTL         = flag.Duration("opa-cache-ttl", 60*time.Second, "TTL for cached OPA decisions (0 = disabled)")
+		opaFailClosed    = flag.Bool("opa-fail-closed", false, "Block requests when OPA is unreachable (C-2 fix)")
+		maxBodyMB        = flag.Int64("max-body-mb", 1, "Maximum request body size in MB (H-6 fix)")
 	)
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.Printf("gql-firewall v0.2.0 starting (listen=%s upstream=%s)", *listenAddr, *upstreamURL)
+	log.Printf("gql-firewall v%s starting (listen=%s upstream=%s)", version, *listenAddr, *upstreamURL)
 
 	// Load local rules configuration
 	rulesCfg := &rules.Config{}
@@ -44,6 +50,9 @@ func main() {
 		cfg, err := config.Load(*configPath)
 		if err != nil {
 			log.Fatalf("failed to load config: %v", err)
+		}
+		if err := rules.Validate(cfg); err != nil {
+			log.Fatalf("invalid config: %v", err)
 		}
 		rulesCfg = cfg
 		log.Printf("loaded config from %s", *configPath)
@@ -60,29 +69,10 @@ func main() {
 		log.Printf("loaded schema from %s (%d types)", *schemaPath, schemaDoc.TypeCount)
 	}
 
-	// Start config file watcher for hot-reload
-	configUpdates := make(chan *rules.Config, 1)
-	if *configReload && *configPath != "" {
-		updates, err := config.Watch(*configPath)
-		if err != nil {
-			log.Fatalf("failed to start config watcher: %v", err)
-		}
-		go func() {
-			for newCfg := range updates {
-				rulesCfg = newCfg
-				metrics.ConfigReloads.Inc()
-				log.Printf("config hot-reloaded from %s", *configPath)
-			}
-		}()
-	} else {
-		// Push initial config so admin API can read it
-		configUpdates <- rulesCfg
-	}
-
 	// Set up OPA client (optional)
 	opaClient := opa.New(*opaEndpoint)
 	if *opaEndpoint != "" {
-		log.Printf("OPA sidecar configured at %s (cache TTL: %s)", *opaEndpoint, *cacheTTL)
+		log.Printf("OPA sidecar configured at %s (cache TTL: %s, fail-closed: %v)", *opaEndpoint, *cacheTTL, *opaFailClosed)
 	} else {
 		log.Printf("no OPA endpoint configured — using local rules only")
 	}
@@ -91,35 +81,49 @@ func main() {
 	tenantStore := tenant.New(rulesCfg)
 
 	evaluator := &compositeEvaluator{
-		local:       rulesCfg,
-		tenants:     tenantStore,
-		opa:         opaClient,
-		schema:      schemaDoc,
-		cacheTTL:    *cacheTTL,
+		local:        rulesCfg,
+		tenants:      tenantStore,
+		opa:          opaClient,
+		schema:       schemaDoc,
+		cacheTTL:     *cacheTTL,
+		opaFailClosed: *opaFailClosed,
 	}
 
 	// Set up the admin API for live rule management
 	if *adminListenAddr != "" {
-		startAdminAPI(*adminListenAddr, evaluator, configUpdates)
+		startAdminAPI(*adminListenAddr, *adminToken, evaluator)
 	}
 
-	// Create the proxy handler
+	// Create the proxy handler with body size limit (H-6 fix)
 	handler := proxy.New(*upstreamURL, evaluator)
+	handler.MaxBodyBytes = *maxBodyMB * 1024 * 1024
 
 	// Build main mux — proxy + metrics
 	mux := http.NewServeMux()
 	mux.Handle("/", handler)
 	mux.Handle("/metrics", metrics.Handler())
 
-	server := &http.Server{Addr: *listenAddr, Handler: mux}
+	// Server hardening: timeouts (H-7 fix)
+	server := &http.Server{
+		Addr:              *listenAddr,
+		Handler:           mux,
+		ReadTimeout:       10 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
 
-	// Graceful shutdown
+	// Graceful shutdown (M-3 fix)
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
-		log.Println("shutting down...")
-		server.Close()
+		log.Println("shutting down gracefully...")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			log.Printf("shutdown error: %v", err)
+		}
 	}()
 
 	log.Printf("listening on %s (metrics at /metrics)", *listenAddr)
@@ -128,51 +132,88 @@ func main() {
 	}
 }
 
+// requireAdminAuth is HTTP middleware for admin API authentication (C-1 fix).
+func requireAdminAuth(expectedToken string, next http.HandlerFunc) http.HandlerFunc {
+	if expectedToken == "" {
+		// No token configured — allow all (backward compat)
+		return next
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth == "" {
+			http.Error(w, `{"error": "authorization required"}`, http.StatusUnauthorized)
+			return
+		}
+		// Support "Bearer <token>" format
+		var token string
+		if len(auth) > 7 && auth[:7] == "Bearer " {
+			token = auth[7:]
+		} else {
+			token = auth
+		}
+		// Constant-time comparison to prevent timing attacks
+		if subtle.ConstantTimeCompare([]byte(token), []byte(expectedToken)) != 1 {
+			http.Error(w, `{"error": "invalid authorization token"}`, http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // startAdminAPI starts the admin HTTP server for live rule management.
-func startAdminAPI(addr string, eval *compositeEvaluator, configUpdates <-chan *rules.Config) {
+func startAdminAPI(addr, token string, eval *compositeEvaluator) {
 	mux := http.NewServeMux()
 
 	// GET /admin/rules — returns current rules configuration
-	mux.HandleFunc("/admin/rules", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/admin/rules", requireAdminAuth(token, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		eval.mu.RLock()
 		cfg := eval.local
 		eval.mu.RUnlock()
+		if cfg == nil {
+			json.NewEncoder(w).Encode(map[string]string{"status": "no config loaded"})
+			return
+		}
 		json.NewEncoder(w).Encode(cfg)
-	})
+	}))
 
-	// PUT /admin/rules — updates rules configuration at runtime
-	mux.HandleFunc("/admin/rules/update", func(w http.ResponseWriter, r *http.Request) {
+	// PUT /admin/rules — updates rules configuration at runtime (with validation, C-3 fix)
+	mux.HandleFunc("/admin/rules/update", requireAdminAuth(token, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost && r.Method != http.MethodPut {
 			http.Error(w, "use POST or PUT", http.StatusMethodNotAllowed)
 			return
 		}
 		var newCfg rules.Config
 		if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
-			http.Error(w, fmt.Sprintf("invalid JSON: %s", err), http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf(`{"error": "invalid JSON: %s"}`, err), http.StatusBadRequest)
+			return
+		}
+		// Validate before applying (C-3 fix)
+		if err := rules.Validate(&newCfg); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error": "invalid config: %s"}`, err), http.StatusBadRequest)
 			return
 		}
 		eval.mu.Lock()
 		eval.local = &newCfg
 		eval.mu.Unlock()
 		metrics.ConfigReloads.Inc()
-		log.Printf("admin API: rules updated")
+		log.Printf("admin API: rules updated (depth=%d fields=%d blocklist=%d)", newCfg.DepthLimit, newCfg.MaxFieldCount, len(newCfg.FieldBlocklist))
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-	})
+	}))
 
 	// GET /admin/tenants — lists all configured tenants
-	mux.HandleFunc("/admin/tenants", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/admin/tenants", requireAdminAuth(token, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if eval.tenants == nil {
 			json.NewEncoder(w).Encode([]string{})
 			return
 		}
 		json.NewEncoder(w).Encode(eval.tenants.List())
-	})
+	}))
 
 	// PUT /admin/tenants/{id} — create or update a tenant's rules
-	mux.HandleFunc("/admin/tenants/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/admin/tenants/", requireAdminAuth(token, func(w http.ResponseWriter, r *http.Request) {
 		tenantID := r.URL.Path[len("/admin/tenants/"):]
 		if tenantID == "" {
 			http.Error(w, "tenant ID required", http.StatusBadRequest)
@@ -195,6 +236,11 @@ func startAdminAPI(addr string, eval *compositeEvaluator, configUpdates <-chan *
 				http.Error(w, fmt.Sprintf("invalid JSON: %s", err), http.StatusBadRequest)
 				return
 			}
+			// Validate tenant config too (C-3 fix)
+			if err := rules.Validate(&newCfg); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error": "invalid config: %s"}`, err), http.StatusBadRequest)
+				return
+			}
 			if eval.tenants != nil {
 				eval.tenants.Set(tenantID, &newCfg)
 				metrics.ActiveTenants.Set(float64(eval.tenants.Count()))
@@ -215,50 +261,58 @@ func startAdminAPI(addr string, eval *compositeEvaluator, configUpdates <-chan *
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
-	})
+	}))
 
-	// GET /admin/stats — returns runtime statistics
-	mux.HandleFunc("/admin/stats", func(w http.ResponseWriter, r *http.Request) {
+	// GET /admin/stats — returns runtime statistics (sanitized, M-5 fix)
+	mux.HandleFunc("/admin/stats", requireAdminAuth(token, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		stats := map[string]interface{}{
-			"cache_entries": 0,
-			"tenants":       1,
-		}
-		if eval.cache != nil {
-			eval.mu.RLock()
-			stats["cache_entries"] = len(eval.cache)
-			eval.mu.RUnlock()
+			"version": version,
+			"uptime":  time.Since(startTime).String(),
 		}
 		if eval.tenants != nil {
 			stats["tenants"] = eval.tenants.Count()
 		}
 		json.NewEncoder(w).Encode(stats)
-	})
+	}))
 
-	// GET /admin/health — simple health check
+	// GET /admin/health — simple health check (no auth needed)
 	mux.HandleFunc("/admin/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
+	// Admin server also gets timeouts (H-7 fix)
+	adminServer := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadTimeout:       10 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
+
 	go func() {
 		log.Printf("admin API listening on %s", addr)
-		if err := http.ListenAndServe(addr, mux); err != nil {
+		if err := adminServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("admin API error: %v", err)
 		}
 	}()
 }
 
+var startTime = time.Now()
+
 // compositeEvaluator runs local rules first, then tenant-specific rules,
 // OPA with caching, then schema validation. Thread-safe for live config reloads.
 type compositeEvaluator struct {
-	mu       sync.RWMutex
-	local    *rules.Config
-	tenants  *tenant.Store
-	opa      *opa.Client
-	schema   *parser.SchemaInfo
-	cacheTTL time.Duration
-	cache    map[string]cachedDecision
+	mu           sync.RWMutex
+	local        *rules.Config
+	tenants      *tenant.Store
+	opa          *opa.Client
+	schema       *parser.SchemaInfo
+	cacheTTL     time.Duration
+	cache        map[string]cachedDecision
+	opaFailClosed bool
 }
 
 type cachedDecision struct {
@@ -273,6 +327,7 @@ func (c *compositeEvaluator) Evaluate(info *parser.QueryInfo) (*rules.Result, er
 	schema := c.schema
 	opaClient := c.opa
 	cacheTTL := c.cacheTTL
+	opaFailClosed := c.opaFailClosed
 	c.mu.RUnlock()
 
 	// 0. Tenant-specific rules (overrides default config)
@@ -321,7 +376,7 @@ func (c *compositeEvaluator) Evaluate(info *parser.QueryInfo) (*rules.Result, er
 		}
 	}
 
-	// 4. OPA evaluation with caching
+	// 4. OPA evaluation with caching (H-3 fix: better cache key includes field paths)
 	if opaClient.Configured() {
 		cacheKey := decisionCacheKey(info)
 		if cacheTTL > 0 {
@@ -337,7 +392,11 @@ func (c *compositeEvaluator) Evaluate(info *parser.QueryInfo) (*rules.Result, er
 		result, err := opaClient.Evaluate(info)
 		if err != nil {
 			metrics.RecordOPA("error")
-			// On OPA error, allow by default (fail open)
+			if opaFailClosed {
+				// C-2 fix: fail closed when configured
+				return &rules.Result{Allowed: false, Reason: "OPA unavailable — request blocked for safety"}, nil
+			}
+			// On OPA error, allow by default (fail open) — backward compat
 			return &rules.Result{Allowed: true}, nil
 		}
 
@@ -361,8 +420,23 @@ func (c *compositeEvaluator) Evaluate(info *parser.QueryInfo) (*rules.Result, er
 	return &rules.Result{Allowed: true}, nil
 }
 
-// decisionCacheKey builds a cache key from query info for repeated pattern matching.
+// decisionCacheKey builds a cache key from query info.
+// H-3 fix: includes a hash of field paths to prevent cache poisoning.
 func decisionCacheKey(info *parser.QueryInfo) string {
-	// Use operation type + depth + field count as a lightweight cache key
-	return fmt.Sprintf("%s|%d|%d", info.OperationType, info.Depth, info.FieldCount)
+	// Include operation type, depth, field count, and a hash of field paths
+	pathHash := simpleHash(info.FieldPaths)
+	return fmt.Sprintf("%s|%d|%d|%s", info.OperationType, info.Depth, info.FieldCount, pathHash)
+}
+
+// simpleHash produces a compact hash from a string slice for cache keys.
+func simpleHash(parts []string) string {
+	h := uint64(14695981039346656037)
+	for _, s := range parts {
+		for _, c := range []byte(s) {
+			h ^= uint64(c)
+			h *= 1099511628211
+		}
+	}
+	// Return first 8 hex chars
+	return fmt.Sprintf("%08x", h)
 }

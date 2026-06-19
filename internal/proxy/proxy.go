@@ -20,6 +20,25 @@ import (
 	"github.com/monch1962/gql-firewall/internal/tenant"
 )
 
+// DefaultMaxBodyBytes is the maximum request body size (1MB).
+const DefaultMaxBodyBytes = 1 * 1024 * 1024
+
+// sanitizeError returns a generic error message suitable for client responses.
+func sanitizeError(context string) string {
+	switch context {
+	case "body":
+		return "invalid request body"
+	case "json":
+		return "invalid JSON in request"
+	case "query":
+		return "invalid GraphQL query"
+	case "eval":
+		return "rule evaluation error"
+	default:
+		return "request processing error"
+	}
+}
+
 // Evaluator is the interface for rule evaluation.
 type Evaluator interface {
 	Evaluate(info *parser.QueryInfo) (*rules.Result, error)
@@ -34,9 +53,10 @@ type graphQLBody struct {
 
 // Handler is an HTTP handler that proxies GraphQL requests through a firewall.
 type Handler struct {
-	upstream    *httputil.ReverseProxy
-	upstreamURL *url.URL
-	evaluator   Evaluator
+	upstream       *httputil.ReverseProxy
+	upstreamURL    *url.URL
+	evaluator      Evaluator
+	MaxBodyBytes   int64
 }
 
 // New creates a new proxy handler that forwards to upstreamURL after
@@ -44,9 +64,10 @@ type Handler struct {
 func New(upstreamURL string, evaluator Evaluator) *Handler {
 	u, _ := url.Parse(upstreamURL)
 	return &Handler{
-		upstream:    httputil.NewSingleHostReverseProxy(u),
-		upstreamURL: u,
-		evaluator:   evaluator,
+		upstream:       httputil.NewSingleHostReverseProxy(u),
+		upstreamURL:    u,
+		evaluator:      evaluator,
+		MaxBodyBytes:   DefaultMaxBodyBytes,
 	}
 }
 
@@ -65,11 +86,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
+	// Enforce body size limit (H-6 fix)
+	r.Body = http.MaxBytesReader(w, r.Body, h.MaxBodyBytes)
+
 	// Read and preserve the body for upstream forwarding
 	bodyBytes, err := io.ReadAll(r.Body)
 	r.Body.Close()
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error": "cannot read request body: %s"}`, err), http.StatusBadRequest)
+		// Check if it was a size limit error
+		if err.Error() == "http: request body too large" {
+			http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("body")), http.StatusRequestEntityTooLarge)
+			metrics.RecordRequest("error", "unknown", time.Since(start))
+			return
+		}
+		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("body")), http.StatusBadRequest)
 		metrics.RecordRequest("error", "unknown", time.Since(start))
 		return
 	}
@@ -77,13 +107,13 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	// Parse the GraphQL JSON body
 	var gqlReq graphQLBody
 	if err := json.Unmarshal(bodyBytes, &gqlReq); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error": "invalid JSON body: %s"}`, err), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("json")), http.StatusBadRequest)
 		metrics.RecordRequest("error", "unknown", time.Since(start))
 		return
 	}
 
 	if gqlReq.Query == "" {
-		http.Error(w, `{"error": "missing 'query' field in request body"}`, http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("query")), http.StatusBadRequest)
 		metrics.RecordRequest("error", "unknown", time.Since(start))
 		return
 	}
@@ -91,7 +121,7 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	// Parse the GraphQL query
 	queryInfo, err := parser.Parse(gqlReq.Query)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error": "invalid GraphQL query: %s"}`, err), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("query")), http.StatusBadRequest)
 		metrics.RecordRequest("error", "unknown", time.Since(start))
 		return
 	}
@@ -106,7 +136,7 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	// Evaluate rules
 	result, err := h.evaluator.Evaluate(queryInfo)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error": "rule evaluation error: %s"}`, err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("eval")), http.StatusInternalServerError)
 		metrics.RecordRequest("error", queryInfo.OperationType, time.Since(start))
 		return
 	}

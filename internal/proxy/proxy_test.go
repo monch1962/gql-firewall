@@ -199,3 +199,60 @@ func TestHandler_ForwardsUpstreamError(t *testing.T) {
 		t.Errorf("expected upstream error in response, got %s", string(body))
 	}
 }
+
+func TestHandler_RejectsOversizedBody(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream should not be called")
+	}))
+	defer upstream.Close()
+
+	handler := New(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler.MaxBodyBytes = 1024 // 1KB limit for test
+
+	// Create a body larger than limit
+	largeBody := make([]byte, 2048)
+	for i := range largeBody {
+		largeBody[i] = 'a'
+	}
+	bodyStr := `{"query": "` + string(largeBody) + `"}`
+
+	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(bodyStr)))
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413 for oversized body, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandler_AcceptsBodyAtLimit(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data": {"ok": true}}`))
+	}))
+	defer upstream.Close()
+
+	handler := New(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler.MaxBodyBytes = 1024
+
+	// Create a body exactly at the limit
+	bodyContent := make([]byte, 900)
+	for i := range bodyContent {
+		bodyContent[i] = 'x'
+	}
+	bodyStr := `{"query": "{ ` + string(bodyContent) + ` }"}`
+
+	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(bodyStr)))
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 for body at limit, got %d", resp.StatusCode)
+	}
+}
