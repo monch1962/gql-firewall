@@ -1,0 +1,6 @@
+{
+  "depth_limit": 10,
+  "max_field_count": 100,
+  "blocked_operations": ["subscription"],
+  "field_blocklist": ["__schema", "__type", "user.ssn", "user.password"]
+}
