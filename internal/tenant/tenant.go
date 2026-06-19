@@ -4,6 +4,7 @@
 package tenant
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"sync"
 
@@ -72,14 +73,16 @@ func (s *Store) Count() int {
 
 // ExtractTenantID extracts a tenant identifier from an API key header.
 // The expected format is "X-API-Key: <tenant_id>_<key>".
-// If the key has no underscore prefix, the entire key is used as the tenant ID.
+// Uses the LAST underscore as separator so tenant IDs can contain underscores
+// (e.g. "my_tenant" is valid with key "my_tenant_secret123").
+// If the key has no underscore, the entire key is used as the tenant ID.
 func ExtractTenantID(apiKey string) string {
 	if apiKey == "" {
 		return ""
 	}
-	// Support format: "tenant_id_secretkey" — extract the tenant prefix
-	for i := 0; i < len(apiKey); i++ {
-		if apiKey[i] == '_' && i > 0 && i < len(apiKey)-1 {
+	// Walk backwards to find the LAST underscore
+	for i := len(apiKey) - 1; i > 0; i-- {
+		if apiKey[i] == '_' && i < len(apiKey)-1 {
 			return apiKey[:i]
 		}
 	}
@@ -88,3 +91,43 @@ func ExtractTenantID(apiKey string) string {
 
 // ErrTenantNotFound is returned when a tenant operation references an unknown ID.
 var ErrTenantNotFound = fmt.Errorf("tenant not found")
+
+// KeyStore maps tenant IDs to expected API key secrets and provides
+// constant-time validation of API keys.
+type KeyStore struct {
+	secrets map[string]string
+}
+
+// NewKeyStore creates a KeyStore from a map of tenant IDs to expected secrets.
+func NewKeyStore(secrets map[string]string) *KeyStore {
+	return &KeyStore{secrets: secrets}
+}
+
+// Validate checks whether an API key is valid for a known tenant.
+// It extracts the tenant prefix (before the last underscore), looks up the
+// expected secret, and compares using constant-time comparison.
+// Returns the tenant ID and whether the key is valid.
+func (ks *KeyStore) Validate(apiKey string) (tenantID string, ok bool) {
+	tenantID = ExtractTenantID(apiKey)
+	if tenantID == "" {
+		return "", false
+	}
+
+	expectedSecret, exists := ks.secrets[tenantID]
+	if !exists {
+		return "", false
+	}
+
+	// No underscore means there's no secret component to validate
+	if tenantID == apiKey {
+		return "", false
+	}
+
+	// Extract secret part: everything after the last underscore
+	secret := apiKey[len(tenantID)+1:] // +1 for the underscore
+
+	if subtle.ConstantTimeCompare([]byte(secret), []byte(expectedSecret)) == 1 {
+		return tenantID, true
+	}
+	return "", false
+}

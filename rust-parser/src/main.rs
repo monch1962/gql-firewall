@@ -23,7 +23,15 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 && args[1] == "--listen" {
         let port = args.get(2).cloned().unwrap_or("9090".to_string());
-        run_http_sidecar(&port);
+        // --bind <addr> defaults to 127.0.0.1; use 0.0.0.0 or :: explicitly if needed
+        let bind = args
+            .iter()
+            .skip(1)
+            .position(|a| a == "--bind")
+            .and_then(|i| args.get(i + 2))
+            .cloned()
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+        run_http_sidecar(&bind, &port);
     } else if args.len() > 1 {
         let path = PathBuf::from(&args[1]);
         let query = std::fs::read_to_string(&path).unwrap_or_else(|e| {
@@ -52,8 +60,8 @@ fn main() {
     }
 }
 
-fn run_http_sidecar(port: &str) {
-    let addr = format!("0.0.0.0:{}", port);
+fn run_http_sidecar(bind: &str, port: &str) {
+    let addr = format!("{}:{}", bind, port);
     let server = Server::http(&addr).unwrap_or_else(|e| {
         eprintln!("failed to start HTTP server: {}", e);
         std::process::exit(1);
@@ -61,7 +69,6 @@ fn run_http_sidecar(port: &str) {
     eprintln!("gql-parser HTTP sidecar listening on {}", addr);
 
     let json_hdr = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-    let cors_hdr = Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap();
 
     for mut request in server.incoming_requests() {
         let count = REQUEST_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
@@ -69,7 +76,7 @@ fn run_http_sidecar(port: &str) {
         if request.as_reader().read_to_string(&mut body).is_err() {
             let _ = request.respond(
                 Response::from_string(r#"{"error":"cannot read body"}"#)
-                    .with_status_code(400).with_header(json_hdr.clone()).with_header(cors_hdr.clone()),
+                    .with_status_code(400).with_header(json_hdr.clone()),
             );
             continue;
         }
@@ -82,7 +89,7 @@ fn run_http_sidecar(port: &str) {
             None => {
                 let _ = request.respond(
                     Response::from_string(r#"{"error":"missing 'query' field"}"#)
-                        .with_status_code(400).with_header(json_hdr.clone()).with_header(cors_hdr.clone()),
+                        .with_status_code(400).with_header(json_hdr.clone()),
                 );
                 continue;
             }
@@ -92,14 +99,14 @@ fn run_http_sidecar(port: &str) {
                 let json = serde_json::to_string(&info).unwrap();
                 let _ = request.respond(
                     Response::from_string(json).with_status_code(200)
-                        .with_header(json_hdr.clone()).with_header(cors_hdr.clone()),
+                        .with_header(json_hdr.clone()),
                 );
             }
             Err(e) => {
                 let err = serde_json::json!({"error": format!("{}", e)});
                 let _ = request.respond(
                     Response::from_string(err.to_string()).with_status_code(400)
-                        .with_header(json_hdr.clone()).with_header(cors_hdr.clone()),
+                        .with_header(json_hdr.clone()),
                 );
             }
         }

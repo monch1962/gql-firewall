@@ -66,28 +66,59 @@ func LoadSchema(path string) (*SchemaInfo, error) {
 }
 
 // Validate checks if the query's fields exist in the schema.
+// It walks the full dot-separated path through the type definitions.
 func (s *SchemaInfo) Validate(info *QueryInfo) (bool, string) {
-	// Basic validation: check that the top-level fields exist
 	for _, path := range info.FieldPaths {
-		// Check each path segment against the schema
 		parts := splitPath(path)
 		if len(parts) == 0 {
 			continue
 		}
 
-		// Check first segment as a top-level field on the Query type
-		queryType := s.Schema.Query
-		if queryType == nil {
+		// Start from the root operation type
+		currentType := s.Schema.Query
+		if currentType == nil {
 			continue
 		}
 
-		field := queryType.Fields.ForName(parts[0])
-		if field == nil {
-			return false, fmt.Sprintf("field %q does not exist on Query type", parts[0])
+		for i, part := range parts {
+			field := currentType.Fields.ForName(part)
+			if field == nil {
+				if i == 0 {
+					return false, fmt.Sprintf("field %q does not exist on Query type", part)
+				}
+				return false, fmt.Sprintf("field %q does not exist on type %q", part, currentType.Name)
+			}
+
+			// If not the last segment, resolve the field's type to continue walking
+			if i < len(parts)-1 {
+				namedType := resolveNamedType(field.Type)
+				if namedType == "" {
+					return false, fmt.Sprintf("cannot resolve type for field %q", part)
+				}
+				def, ok := s.Schema.Types[namedType]
+				if !ok {
+					return false, fmt.Sprintf("type %q not found in schema", namedType)
+				}
+				currentType = def
+			}
 		}
 	}
 
 	return true, ""
+}
+
+// resolveNamedType unwraps NonNull and List type wrappers to find the base named type.
+func resolveNamedType(t *ast.Type) string {
+	if t == nil {
+		return ""
+	}
+	if t.NamedType != "" {
+		return t.NamedType
+	}
+	if t.Elem != nil {
+		return resolveNamedType(t.Elem)
+	}
+	return ""
 }
 
 // Parse analyses a raw GraphQL query string and returns structured information

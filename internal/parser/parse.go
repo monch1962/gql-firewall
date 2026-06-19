@@ -25,29 +25,46 @@ func parseGraphQL(query string) (*QueryInfo, error) {
 		return nil, fmt.Errorf("no operations found")
 	}
 
-	op := doc.Operations[0]
-	info := &QueryInfo{}
-
-	switch op.Operation {
-	case ast.Query:
-		info.OperationType = "query"
-	case ast.Mutation:
-		info.OperationType = "mutation"
-	case ast.Subscription:
-		info.OperationType = "subscription"
-	default:
-		info.OperationType = "unknown"
+	info := &QueryInfo{
+		Depth:      0,
+		FieldCount: 0,
+		FieldPaths: []string{},
 	}
 
-	if op.Name != "" {
-		info.OperationName = op.Name
+	for i, op := range doc.Operations {
+		// Use the first operation's type and name as the representative values.
+		if i == 0 {
+			switch op.Operation {
+			case ast.Query:
+				info.OperationType = "query"
+			case ast.Mutation:
+				info.OperationType = "mutation"
+			case ast.Subscription:
+				info.OperationType = "subscription"
+			default:
+				info.OperationType = "unknown"
+			}
+			if op.Name != "" {
+				info.OperationName = op.Name
+			}
+		}
+
+		opInfo := &QueryInfo{
+			Depth:      0,
+			FieldCount: 0,
+			FieldPaths: []string{},
+		}
+		walkSelections(op.SelectionSet, "", 0, opInfo, doc)
+
+		// Aggregate: max depth, max field count, union of field paths.
+		if opInfo.Depth > info.Depth {
+			info.Depth = opInfo.Depth
+		}
+		if opInfo.FieldCount > info.FieldCount {
+			info.FieldCount = opInfo.FieldCount
+		}
+		info.FieldPaths = append(info.FieldPaths, opInfo.FieldPaths...)
 	}
-
-	info.Depth = 0
-	info.FieldCount = 0
-	info.FieldPaths = []string{}
-
-	walkSelections(op.SelectionSet, "", 0, info, doc)
 
 	return info, nil
 }

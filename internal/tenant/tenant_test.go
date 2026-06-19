@@ -89,11 +89,88 @@ func TestExtractTenantID(t *testing.T) {
 		{"mytenant_secret", "mytenant"},
 		{"simplekey", "simplekey"},
 		{"", ""},
+		// Multi-underscore: uses LAST underscore as separator
+		{"my_tenant_secret123", "my_tenant"},
+		{"a_b_c_d", "a_b_c"},
 	}
 	for _, tt := range tests {
 		got := ExtractTenantID(tt.key)
 		if got != tt.expected {
 			t.Errorf("ExtractTenantID(%q) = %q, want %q", tt.key, got, tt.expected)
 		}
+	}
+}
+
+func TestValidateKey_Valid(t *testing.T) {
+	ks := NewKeyStore(map[string]string{
+		"acme":      "secret123",
+		"my_tenant": "mysupersecret",
+	})
+
+	tid, ok := ks.Validate("acme_secret123")
+	if !ok {
+		t.Fatal("expected valid key for acme")
+	}
+	if tid != "acme" {
+		t.Errorf("expected tenantID=acme, got %q", tid)
+	}
+
+	tid, ok = ks.Validate("my_tenant_mysupersecret")
+	if !ok {
+		t.Fatal("expected valid key for my_tenant")
+	}
+	if tid != "my_tenant" {
+		t.Errorf("expected tenantID=my_tenant, got %q", tid)
+	}
+}
+
+func TestValidateKey_WrongSecret(t *testing.T) {
+	ks := NewKeyStore(map[string]string{
+		"acme": "correct_secret",
+	})
+
+	tid, ok := ks.Validate("acme_wrong_secret")
+	if ok {
+		t.Fatal("expected invalid key for wrong secret")
+	}
+	if tid != "" {
+		t.Errorf("expected empty tenantID, got %q", tid)
+	}
+}
+
+func TestValidateKey_UnknownTenant(t *testing.T) {
+	ks := NewKeyStore(map[string]string{
+		"known": "secret",
+	})
+
+	tid, ok := ks.Validate("unknown_secret")
+	if ok {
+		t.Fatal("expected invalid key for unknown tenant")
+	}
+	if tid != "" {
+		t.Errorf("expected empty tenantID, got %q", tid)
+	}
+}
+
+func TestValidateKey_EmptyKey(t *testing.T) {
+	ks := NewKeyStore(map[string]string{
+		"test": "secret",
+	})
+
+	tid, ok := ks.Validate("")
+	if ok {
+		t.Fatal("expected invalid key for empty string")
+	}
+	if tid != "" {
+		t.Errorf("expected empty tenantID, got %q", tid)
+	}
+
+	// Also test no-underscore key (no secret component)
+	tid, ok = ks.Validate("justtenant")
+	if ok {
+		t.Fatal("expected invalid key when no secret component")
+	}
+	if tid != "" {
+		t.Errorf("expected empty tenantID, got %q", tid)
 	}
 }

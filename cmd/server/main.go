@@ -38,6 +38,9 @@ func main() {
 		cacheTTL         = flag.Duration("opa-cache-ttl", 60*time.Second, "TTL for cached OPA decisions (0 = disabled)")
 		opaFailClosed    = flag.Bool("opa-fail-closed", false, "Block requests when OPA is unreachable (C-2 fix)")
 		maxBodyMB        = flag.Int64("max-body-mb", 1, "Maximum request body size in MB (H-6 fix)")
+		tlsCert          = flag.String("tls-cert", "", "Path to TLS certificate file (H-5 fix)")
+		tlsKey           = flag.String("tls-key", "", "Path to TLS private key file (H-5 fix)")
+		metricsListen    = flag.String("metrics-listen", "", "Separate listen address for metrics (M-4 fix; empty = serve on main port)")
 	)
 	flag.Parse()
 
@@ -98,10 +101,31 @@ func main() {
 	handler := proxy.New(*upstreamURL, evaluator)
 	handler.MaxBodyBytes = *maxBodyMB * 1024 * 1024
 
-	// Build main mux — proxy + metrics
+	// Build main mux — proxy
 	mux := http.NewServeMux()
 	mux.Handle("/", handler)
-	mux.Handle("/metrics", metrics.Handler())
+
+	// Metrics on separate port or main port (M-4 fix)
+	if *metricsListen != "" {
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle("/metrics", metrics.Handler())
+		metricsServer := &http.Server{
+			Addr:              *metricsListen,
+			Handler:           metricsMux,
+			ReadHeaderTimeout: 5 * time.Second,
+			IdleTimeout:       30 * time.Second,
+		}
+		go func() {
+			log.Printf("metrics listening on %s", *metricsListen)
+			if *tlsCert != "" && *tlsKey != "" {
+				metricsServer.ListenAndServeTLS(*tlsCert, *tlsKey)
+			} else {
+				metricsServer.ListenAndServe()
+			}
+		}()
+	} else {
+		mux.Handle("/metrics", metrics.Handler())
+	}
 
 	// Server hardening: timeouts (H-7 fix)
 	server := &http.Server{
@@ -126,9 +150,16 @@ func main() {
 		}
 	}()
 
-	log.Printf("listening on %s (metrics at /metrics)", *listenAddr)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("server error: %v", err)
+	log.Printf("listening on %s", *listenAddr)
+	if *tlsCert != "" && *tlsKey != "" {
+		log.Printf("TLS enabled (cert=%s)", *tlsCert)
+		if err := server.ListenAndServeTLS(*tlsCert, *tlsKey); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	} else {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
 	}
 }
 
