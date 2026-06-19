@@ -29,7 +29,39 @@ gql-firewall's OPA Rego policies (35 tests) cover 12 attack categories — the m
 | 11 | **Query Cost** — Cheap-to-parse, expensive-to-execute queries | `depth × field_count ≤ 50` budget | ✅ |
 | 12 | **Persisted Query Bypass** — Dynamic queries in PQ-only mode | `require_persisted_queries` + hash validation | ✅ |
 
-## Features
+## CLI Flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--listen` | `:8081` | Firewall proxy listen address |
+| `--upstream` | `http://localhost:8080` | Upstream GraphQL server |
+| `--config` | `config/rules.json` | Path to rules configuration JSON |
+| `--schema` | `""` | Path to GraphQL SDL schema (optional) |
+| `--opa` | `""` | OPA sidecar endpoint (optional) |
+| `--opa-cache-ttl` | `60s` | TTL for cached OPA decisions |
+| `--opa-fail-closed` | `false` | Block when OPA is unreachable |
+| `--admin` | `:8082` | Admin API listen address (empty = disable) |
+| `--admin-token` | `""` | Bearer token for admin API auth |
+| `--metrics-listen` | `""` | Separate metrics port (empty = serve on main port) |
+| `--tls-cert` | `""` | TLS certificate file path |
+| `--tls-key` | `""` | TLS private key file path |
+| `--max-body-mb` | `1` | Maximum request body size in MB |
+
+### Security Features
+
+| Feature | Flag / Config | What it prevents |
+|---|---|---|
+| **Admin API auth** | `--admin-token` | Unauthorized admin API access (C-1) |
+| **OPA fail-closed** | `--opa-fail-closed` | Bypass via OPA DoS (C-2) |
+| **Config validation** | Built-in | Disabled protections via empty config (C-3) |
+| **TLS encryption** | `--tls-cert` + `--tls-key` | Cleartext interception (H-5) |
+| **Body size limit** | `--max-body-mb` | OOM via oversized requests (H-6) |
+| **Server timeouts** | Built-in | Slow loris / connection exhaustion (H-7) |
+| **Tenant key validation** | Via API | Tenant impersonation (H-2) |
+| **Sanitized errors** | Built-in | Information disclosure (H-4) |
+| **Improved cache key** | Built-in | OPA cache poisoning (H-3) |
+| **Metrics isolation** | `--metrics-listen` | Traffic pattern leakage (M-4) |
+| **Graceful shutdown** | Built-in | Dropped requests on deploy (M-3) |
 
 ### Core
 - **GraphQL query parsing** — Parses queries, mutations, and subscriptions using `gqlparser` (Go) or `async-graphql-parser` (Rust). Extracts operation type, name, depth, field count, and full field paths.
@@ -328,7 +360,7 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           67 tests  — parser, rules, config, metrics, opa client, tenant, proxy, integration
+Go:           79 tests  — parser, rules, config, metrics, opa client, tenant, proxy, integration
 Rust:          7 tests  — parsing, depth, fields, paths, mutations, errors
 OPA/Rego:     35 tests  — 12 attack categories, edge cases, combined rules
 Total:       102 tests  — all passing
