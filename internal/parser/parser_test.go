@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -371,10 +372,10 @@ func TestValidate_NestedPathValidation(t *testing.T) {
 		{"single nested field", []string{"user.name"}, true, ""},
 		{"deeply nested field", []string{"user.profile.email"}, true, ""},
 		{"another deep nested field", []string{"user.profile.age"}, true, ""},
-		{"invalid top-level field", []string{"nonexistent"}, false, `"nonexistent" does not exist on Query type`},
-		{"invalid nested field", []string{"user.nonexistent"}, false, `"nonexistent" does not exist on type "User"`},
-		{"invalid deeply nested field", []string{"user.profile.nonexistent"}, false, `"nonexistent" does not exist on type "Profile"`},
-		{"multiple paths, one invalid", []string{"user", "user.nonexistent"}, false, `"nonexistent" does not exist on type "User"`},
+		{"invalid top-level field", []string{"nonexistent"}, false, `field "nonexistent" does not exist on type "Query"`},
+		{"invalid nested field", []string{"user.nonexistent"}, false, `field "nonexistent" does not exist on type "User"`},
+		{"invalid deeply nested field", []string{"user.profile.nonexistent"}, false, `field "nonexistent" does not exist on type "Profile"`},
+		{"multiple paths, one invalid", []string{"user", "user.nonexistent"}, false, `field "nonexistent" does not exist on type "User"`},
 	}
 
 	for _, tt := range tests {
@@ -447,11 +448,79 @@ func TestValidate_EmptyFieldPaths(t *testing.T) {
 }
 
 func TestValidate_NilQueryType(t *testing.T) {
-	// When Schema.Query is nil, Validate should return true (skip)
 	schemaInfo := &SchemaInfo{Schema: &ast.Schema{}}
 	info := &QueryInfo{FieldPaths: []string{"anything"}}
 	ok, msg := schemaInfo.Validate(info)
 	if !ok {
 		t.Errorf("Validate() = false, want true when Query is nil; msg=%q", msg)
+	}
+}
+
+func TestResolveNamedType(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    *ast.Type
+		expected string
+	}{
+		{"named type", &ast.Type{NamedType: "User"}, "User"},
+		{"non-null named", &ast.Type{NamedType: "User", NonNull: true}, "User"},
+		{"list of named", &ast.Type{Elem: &ast.Type{NamedType: "Post"}, NamedType: ""}, "Post"},
+		{"non-null list of named",
+			&ast.Type{Elem: &ast.Type{NamedType: "Comment"}, NonNull: true, NamedType: ""}, "Comment"},
+		{"list of non-null named",
+			&ast.Type{Elem: &ast.Type{NamedType: "Tag", NonNull: true}}, "Tag"},
+		{"non-null list of non-null named",
+			&ast.Type{
+				Elem:    &ast.Type{Elem: &ast.Type{NamedType: "Deep", NonNull: true}, NonNull: true},
+				NonNull: true,
+			}, "Deep"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveNamedType(tt.input)
+			if got != tt.expected {
+				t.Errorf("resolveNamedType(%+v) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestLoadSchema_ValidFile(t *testing.T) {
+	// Create a temporary schema file
+	dir := t.TempDir()
+	schemaPath := dir + "/schema.graphql"
+	schema := `
+		type Query {
+			hello: String
+			user(id: Int!): User
+		}
+		type User {
+			name: String
+			email: String
+		}
+		scalar String
+		scalar Int
+	`
+	if err := os.WriteFile(schemaPath, []byte(schema), 0644); err != nil {
+		t.Fatalf("writing schema: %v", err)
+	}
+	info, err := LoadSchema(schemaPath)
+	if err != nil {
+		t.Fatalf("LoadSchema: %v", err)
+	}
+	if info.Schema == nil {
+		t.Fatal("expected non-nil Schema")
+	}
+}
+
+func TestLoadSchema_InvalidFile(t *testing.T) {
+	dir := t.TempDir()
+	schemaPath := dir + "/bad.graphql"
+	if err := os.WriteFile(schemaPath, []byte("this is not valid SDL"), 0644); err != nil {
+		t.Fatalf("writing schema: %v", err)
+	}
+	_, err := LoadSchema(schemaPath)
+	if err == nil {
+		t.Error("expected error for invalid schema, got nil")
 	}
 }

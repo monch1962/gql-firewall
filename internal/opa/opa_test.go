@@ -8,7 +8,18 @@ import (
 	"github.com/monch1962/gql-firewall/internal/parser"
 )
 
-func TestEvaluate_AllowsQuery(t *testing.T) {
+func TestConfigured(t *testing.T) {
+	c := New("")
+	if c.Configured() {
+		t.Error("expected Configured()=false for empty endpoint")
+	}
+	c2 := New("http://localhost:8181")
+	if !c2.Configured() {
+		t.Error("expected Configured()=true for non-empty endpoint")
+	}
+}
+
+func TestEvaluate_AllowsByDefaultWhenNotConfigured(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			t.Errorf("expected POST, got %s", r.Method)

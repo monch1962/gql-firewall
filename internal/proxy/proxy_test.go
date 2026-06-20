@@ -11,7 +11,32 @@ import (
 	"github.com/monch1962/gql-firewall/internal/rules"
 )
 
-// stubEvaluator implements evaluator for testing.
+func TestSanitizeError(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"body", "invalid request body"},
+		{"json", "invalid JSON in request"},
+		{"query", "invalid GraphQL query"},
+		{"eval", "rule evaluation error"},
+		{"unknown", "request processing error"},
+		{"", "request processing error"},
+	}
+	for _, tt := range tests {
+		got := sanitizeError(tt.input)
+		if got != tt.expected {
+			t.Errorf("sanitizeError(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestDefaultMaxBodyBytes(t *testing.T) {
+	if DefaultMaxBodyBytes != 1*1024*1024 {
+		t.Errorf("expected DefaultMaxBodyBytes=1MB, got %d", DefaultMaxBodyBytes)
+	}
+}
+
 type stubEvaluator struct {
 	result *rules.Result
 	err    error

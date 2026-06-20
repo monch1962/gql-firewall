@@ -13,18 +13,12 @@ import (
 
 // QueryInfo holds the results of parsing and analysing a GraphQL query.
 type QueryInfo struct {
-	// OperationType is "query", "mutation", or "subscription".
-	OperationType string `json:"operation_type"`
-	// OperationName is the optional named operation (e.g. "GetUser").
-	OperationName string `json:"operation_name,omitempty"`
-	// Depth is the maximum nesting depth of fields in the query.
-	Depth int `json:"depth"`
-	// FieldCount is the total number of leaf fields requested.
-	FieldCount int `json:"field_count"`
-	// FieldPaths contains the dot-separated paths of all fields (e.g. "user.profile.email").
-	FieldPaths []string `json:"field_paths"`
-	// TenantID identifies the tenant for per-tenant policy isolation.
-	TenantID string `json:"tenant_id,omitempty"`
+	OperationType string   `json:"operation_type"`
+	OperationName string   `json:"operation_name,omitempty"`
+	Depth         int      `json:"depth"`
+	FieldCount    int      `json:"field_count"`
+	FieldPaths    []string `json:"field_paths"`
+	TenantID      string   `json:"tenant_id,omitempty"`
 }
 
 // SchemaInfo holds a compiled GraphQL schema for schema-aware validation.
@@ -39,24 +33,29 @@ func LoadSchema(path string) (*SchemaInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading schema file: %w", err)
 	}
+	return LoadSchemaFromBytes(data, path)
+}
 
+// LoadSchemaFromString compiles a GraphQL SDL schema from a string (for testing).
+func LoadSchemaFromString(schema string) (*SchemaInfo, error) {
+	return LoadSchemaFromBytes([]byte(schema), "inline")
+}
+
+// LoadSchemaFromBytes compiles a GraphQL SDL schema from raw bytes.
+func LoadSchemaFromBytes(data []byte, name string) (*SchemaInfo, error) {
 	source := &ast.Source{
 		Input: string(data),
-		Name:  path,
+		Name:  name,
 	}
 
-	schema, err := validator.ValidateSchemaDocument(&ast.SchemaDocument{})
+	doc, err := parser.ParseSchema(source)
 	if err != nil {
-		// Try loading via SchemaDocument parser instead
-		doc, parseErr := parser.ParseSchema(source)
-		if parseErr != nil {
-			return nil, fmt.Errorf("parsing schema: %w", parseErr)
-		}
-		s, sErr := validator.ValidateSchemaDocument(doc)
-		if sErr != nil {
-			return nil, fmt.Errorf("validating schema: %w", sErr)
-		}
-		schema = s
+		return nil, fmt.Errorf("parsing schema: %w", err)
+	}
+
+	schema, err := validator.ValidateSchemaDocument(doc)
+	if err != nil {
+		return nil, fmt.Errorf("validating schema: %w", err)
 	}
 
 	return &SchemaInfo{
@@ -74,36 +73,34 @@ func (s *SchemaInfo) Validate(info *QueryInfo) (bool, string) {
 			continue
 		}
 
-		// Start from the root operation type
 		currentType := s.Schema.Query
 		if currentType == nil {
 			continue
 		}
 
-		for i, part := range parts {
-			field := currentType.Fields.ForName(part)
+		for i, segment := range parts {
+			field := currentType.Fields.ForName(segment)
 			if field == nil {
-				if i == 0 {
-					return false, fmt.Sprintf("field %q does not exist on Query type", part)
-				}
-				return false, fmt.Sprintf("field %q does not exist on type %q", part, currentType.Name)
+				return false, fmt.Sprintf("field %q does not exist on type %q", segment, currentType.Name)
 			}
 
-			// If not the last segment, resolve the field's type to continue walking
-			if i < len(parts)-1 {
-				namedType := resolveNamedType(field.Type)
-				if namedType == "" {
-					return false, fmt.Sprintf("cannot resolve type for field %q", part)
-				}
-				def, ok := s.Schema.Types[namedType]
-				if !ok {
-					return false, fmt.Sprintf("type %q not found in schema", namedType)
-				}
-				currentType = def
+			if i == len(parts)-1 {
+				break
 			}
+
+			// Resolve the field's return type for the next segment
+			namedType := resolveNamedType(field.Type)
+			if namedType == "" {
+				return false, fmt.Sprintf("cannot resolve return type for field %q", segment)
+			}
+
+			nextType, ok := s.Schema.Types[namedType]
+			if !ok {
+				return false, fmt.Sprintf("type %q not found in schema", namedType)
+			}
+			currentType = nextType
 		}
 	}
-
 	return true, ""
 }
 
@@ -121,8 +118,7 @@ func resolveNamedType(t *ast.Type) string {
 	return ""
 }
 
-// Parse analyses a raw GraphQL query string and returns structured information
-// about its structure, depth, fields, and operation type.
+// Parse analyses a raw GraphQL query string and returns structured information.
 func Parse(query string) (*QueryInfo, error) {
 	return parseGraphQL(query)
 }
