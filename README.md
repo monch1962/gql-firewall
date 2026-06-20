@@ -88,6 +88,7 @@ gql-firewall's OPA Rego policies (35 tests) cover 12 attack categories — the m
 
 ### Security
 - **12 attack vectors covered** (see table above)
+- **Red-team verified** — 30 attack simulation tests across Go proxy, Go parser, and Rust parser. 7 real vulnerabilities found and patched (Content-Type bypass, case-sensitive path bypass, OPA reason injection, tenant ID extraction bug, Rust circular fragment crash, upstream URL validation, Rust HTTP body size).
 - **Deny-override model** — requests pass by default, blocked only by matching deny rules (safe for phased rollout)
 - **Sensitive field blocking** — SSN, passwords, credit cards, API keys, secrets
 - **Introspection blocking** — direct + nested paths
@@ -338,15 +339,15 @@ gql-firewall/
 ├── cmd/server/main.go            # Entry point — wires everything together (+ test, 33 tests)
 ├── config/rules.json             # Sample firewall rules
 ├── internal/
-│   ├── parser/                   # GraphQL query analysis (25 tests)
-│   ├── rules/                    # Configurable rule evaluation (19+8 tests)
+│   ├── parser/                   # GraphQL query analysis (37 tests, including 13 invalid-input tests)
+│   ├── rules/                    # Configurable rule evaluation (27 tests)
 │   ├── config/                   # JSON config loader (7 tests)
 │   ├── metrics/                  # Prometheus instrumentation (5 tests)
 │   ├── opa/                      # OPA sidecar client (7 tests)
-│   ├── proxy/                    # HTTP reverse proxy (14 tests)
+│   ├── proxy/                    # HTTP reverse proxy (29 tests, including 14 red-team attack tests)
 │   ├── tenant/                   # Per-tenant rules isolation (11 tests)
 │   └── integration/              # End-to-end pipeline tests (9 tests)
-├── rust-parser/                  # Rust hot-path parser (7 tests)
+├── rust-parser/                  # Rust hot-path parser (8 tests, with circular fragment protection)
 │   ├── Cargo.toml
 │   └── src/main.rs              # CLI + HTTP sidecar
 ├── opa-policies/                 # OWA Rego policy templates
@@ -360,11 +361,11 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           138 tests — server(33), parser(25), rules(19+8), proxy(14), tenant(11),
+Go:           165 tests — server(33), parser(37), proxy(29), rules(27), tenant(11),
                     integration(9), config(7), opa(7), metrics(5)
-Rust:          7 tests  — parsing, depth, fields, paths, mutations, errors
+Rust:          8 tests  — parsing, depth, fields, paths, mutations, errors, circular fragments
 OPA/Rego:     35 tests  — 12 attack categories, edge cases, combined rules
-Total:       180 tests  — all passing
+Total:       208 tests  — all passing
 ```
 
 ```bash
