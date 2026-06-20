@@ -5,10 +5,10 @@ import (
 )
 
 var (
-	ErrNilConfig       = errors.New("config is nil")
-	ErrNoProtection    = errors.New("config must have at least one protection enabled (depth_limit, max_field_count, or field_blocklist)")
-	ErrNegativeDepth   = errors.New("depth_limit must be non-negative")
-	ErrNegativeFields  = errors.New("max_field_count must be non-negative")
+	ErrNilConfig      = errors.New("config is nil")
+	ErrNoProtection   = errors.New("config must have at least one protection enabled (depth_limit, max_field_count, or field_blocklist)")
+	ErrNegativeDepth  = errors.New("depth_limit must be non-negative")
+	ErrNegativeFields = errors.New("max_field_count must be non-negative")
 )
 
 // Validate checks the config for safe, non-zero values.

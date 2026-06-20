@@ -5,7 +5,6 @@ package tenant
 
 import (
 	"crypto/subtle"
-	"fmt"
 	"sync"
 
 	"github.com/monch1962/gql-firewall/internal/rules"
@@ -88,9 +87,6 @@ func ExtractTenantID(apiKey string) string {
 	}
 	return apiKey
 }
-
-// ErrTenantNotFound is returned when a tenant operation references an unknown ID.
-var ErrTenantNotFound = fmt.Errorf("tenant not found")
 
 // KeyStore maps tenant IDs to expected API key secrets and provides
 // constant-time validation of API keys.

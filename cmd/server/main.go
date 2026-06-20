@@ -28,23 +28,23 @@ const version = "0.3.0"
 
 func main() {
 	var (
-		listenAddr       = flag.String("listen", ":8081", "Address to listen on")
-		upstreamURL      = flag.String("upstream", "http://localhost:8080", "Upstream GraphQL server URL")
-		configPath       = flag.String("config", "config/rules.json", "Path to rules configuration JSON file")
-		opaEndpoint      = flag.String("opa", "", "OPA sidecar endpoint (optional)")
-		schemaPath       = flag.String("schema", "", "Path to GraphQL SDL schema file (optional)")
-		adminListenAddr  = flag.String("admin", ":8082", "Admin API listen address (set to empty to disable)")
-		adminToken       = flag.String("admin-token", "", "Required bearer token for admin API (C-1 fix)")
-		cacheTTL         = flag.Duration("opa-cache-ttl", 60*time.Second, "TTL for cached OPA decisions (0 = disabled)")
-		opaFailClosed    = flag.Bool("opa-fail-closed", false, "Block requests when OPA is unreachable (C-2 fix)")
-		maxBodyMB        = flag.Int64("max-body-mb", 1, "Maximum request body size in MB (H-6 fix)")
-		tlsCert          = flag.String("tls-cert", "", "Path to TLS certificate file (H-5 fix)")
-		tlsKey           = flag.String("tls-key", "", "Path to TLS private key file (H-5 fix)")
-		metricsListen    = flag.String("metrics-listen", "", "Separate listen address for metrics (M-4 fix; empty = serve on main port)")
+		listenAddr      = flag.String("listen", ":8081", "Address to listen on")
+		upstreamURL     = flag.String("upstream", "http://localhost:8080", "Upstream GraphQL server URL")
+		configPath      = flag.String("config", "config/rules.json", "Path to rules configuration JSON file")
+		opaEndpoint     = flag.String("opa", "", "OPA sidecar endpoint (optional)")
+		schemaPath      = flag.String("schema", "", "Path to GraphQL SDL schema file (optional)")
+		adminListenAddr = flag.String("admin", ":8082", "Admin API listen address (set to empty to disable)")
+		adminToken      = flag.String("admin-token", "", "Required bearer token for admin API (C-1 fix)")
+		cacheTTL        = flag.Duration("opa-cache-ttl", 60*time.Second, "TTL for cached OPA decisions (0 = disabled)")
+		opaFailClosed   = flag.Bool("opa-fail-closed", false, "Block requests when OPA is unreachable (C-2 fix)")
+		maxBodyMB       = flag.Int64("max-body-mb", 1, "Maximum request body size in MB (H-6 fix)")
+		tlsCert         = flag.String("tls-cert", "", "Path to TLS certificate file (H-5 fix)")
+		tlsKey          = flag.String("tls-key", "", "Path to TLS private key file (H-5 fix)")
+		metricsListen   = flag.String("metrics-listen", "", "Separate listen address for metrics (M-4 fix; empty = serve on main port)")
 	)
 	flag.Parse()
 
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	log.Printf("gql-firewall v%s starting (listen=%s upstream=%s)", version, *listenAddr, *upstreamURL)
 
 	// Load local rules configuration
@@ -84,11 +84,11 @@ func main() {
 	tenantStore := tenant.New(rulesCfg)
 
 	evaluator := &compositeEvaluator{
-		local:        rulesCfg,
-		tenants:      tenantStore,
-		opa:          opaClient,
-		schema:       schemaDoc,
-		cacheTTL:     *cacheTTL,
+		local:         rulesCfg,
+		tenants:       tenantStore,
+		opa:           opaClient,
+		schema:        schemaDoc,
+		cacheTTL:      *cacheTTL,
 		opaFailClosed: *opaFailClosed,
 	}
 
@@ -191,11 +191,11 @@ func requireAdminAuth(expectedToken string, next http.HandlerFunc) http.HandlerF
 	}
 }
 
-// startAdminAPI starts the admin HTTP server for live rule management.
-func startAdminAPI(addr, token string, eval *compositeEvaluator) {
+// adminMux creates the admin API HTTP mux with all handlers configured.
+// Exported for testing — shared between production startAdminAPI and test servers.
+func adminMux(token string, eval *compositeEvaluator) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	// GET /admin/rules — returns current rules configuration
 	mux.HandleFunc("/admin/rules", requireAdminAuth(token, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		eval.mu.RLock()
@@ -208,7 +208,6 @@ func startAdminAPI(addr, token string, eval *compositeEvaluator) {
 		json.NewEncoder(w).Encode(cfg)
 	}))
 
-	// PUT /admin/rules — updates rules configuration at runtime (with validation, C-3 fix)
 	mux.HandleFunc("/admin/rules/update", requireAdminAuth(token, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost && r.Method != http.MethodPut {
 			http.Error(w, "use POST or PUT", http.StatusMethodNotAllowed)
@@ -219,7 +218,6 @@ func startAdminAPI(addr, token string, eval *compositeEvaluator) {
 			http.Error(w, fmt.Sprintf(`{"error": "invalid JSON: %s"}`, err), http.StatusBadRequest)
 			return
 		}
-		// Validate before applying (C-3 fix)
 		if err := rules.Validate(&newCfg); err != nil {
 			http.Error(w, fmt.Sprintf(`{"error": "invalid config: %s"}`, err), http.StatusBadRequest)
 			return
@@ -233,7 +231,6 @@ func startAdminAPI(addr, token string, eval *compositeEvaluator) {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}))
 
-	// GET /admin/tenants — lists all configured tenants
 	mux.HandleFunc("/admin/tenants", requireAdminAuth(token, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if eval.tenants == nil {
@@ -243,7 +240,6 @@ func startAdminAPI(addr, token string, eval *compositeEvaluator) {
 		json.NewEncoder(w).Encode(eval.tenants.List())
 	}))
 
-	// PUT /admin/tenants/{id} — create or update a tenant's rules
 	mux.HandleFunc("/admin/tenants/", requireAdminAuth(token, func(w http.ResponseWriter, r *http.Request) {
 		tenantID := r.URL.Path[len("/admin/tenants/"):]
 		if tenantID == "" {
@@ -267,7 +263,6 @@ func startAdminAPI(addr, token string, eval *compositeEvaluator) {
 				http.Error(w, fmt.Sprintf("invalid JSON: %s", err), http.StatusBadRequest)
 				return
 			}
-			// Validate tenant config too (C-3 fix)
 			if err := rules.Validate(&newCfg); err != nil {
 				http.Error(w, fmt.Sprintf(`{"error": "invalid config: %s"}`, err), http.StatusBadRequest)
 				return
@@ -294,7 +289,6 @@ func startAdminAPI(addr, token string, eval *compositeEvaluator) {
 		}
 	}))
 
-	// GET /admin/stats — returns runtime statistics (sanitized, M-5 fix)
 	mux.HandleFunc("/admin/stats", requireAdminAuth(token, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		stats := map[string]interface{}{
@@ -307,11 +301,17 @@ func startAdminAPI(addr, token string, eval *compositeEvaluator) {
 		json.NewEncoder(w).Encode(stats)
 	}))
 
-	// GET /admin/health — simple health check (no auth needed)
 	mux.HandleFunc("/admin/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
+
+	return mux
+}
+
+// startAdminAPI starts the admin HTTP server for live rule management.
+func startAdminAPI(addr, token string, eval *compositeEvaluator) {
+	mux := adminMux(token, eval)
 
 	// Admin server also gets timeouts (H-7 fix)
 	adminServer := &http.Server{
@@ -336,13 +336,13 @@ var startTime = time.Now()
 // compositeEvaluator runs local rules first, then tenant-specific rules,
 // OPA with caching, then schema validation. Thread-safe for live config reloads.
 type compositeEvaluator struct {
-	mu           sync.RWMutex
-	local        *rules.Config
-	tenants      *tenant.Store
-	opa          *opa.Client
-	schema       *parser.SchemaInfo
-	cacheTTL     time.Duration
-	cache        map[string]cachedDecision
+	mu            sync.RWMutex
+	local         *rules.Config
+	tenants       *tenant.Store
+	opa           *opa.Client
+	schema        *parser.SchemaInfo
+	cacheTTL      time.Duration
+	cache         map[string]cachedDecision
 	opaFailClosed bool
 }
 

@@ -53,10 +53,9 @@ type graphQLBody struct {
 
 // Handler is an HTTP handler that proxies GraphQL requests through a firewall.
 type Handler struct {
-	upstream       *httputil.ReverseProxy
-	upstreamURL    *url.URL
-	evaluator      Evaluator
-	MaxBodyBytes   int64
+	upstream     *httputil.ReverseProxy
+	evaluator    Evaluator
+	MaxBodyBytes int64
 }
 
 // New creates a new proxy handler that forwards to upstreamURL after
@@ -64,10 +63,9 @@ type Handler struct {
 func New(upstreamURL string, evaluator Evaluator) *Handler {
 	u, _ := url.Parse(upstreamURL)
 	return &Handler{
-		upstream:       httputil.NewSingleHostReverseProxy(u),
-		upstreamURL:    u,
-		evaluator:      evaluator,
-		MaxBodyBytes:   DefaultMaxBodyBytes,
+		upstream:     httputil.NewSingleHostReverseProxy(u),
+		evaluator:    evaluator,
+		MaxBodyBytes: DefaultMaxBodyBytes,
 	}
 }
 
@@ -150,17 +148,12 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Record allowed metric before forwarding
+	metrics.RecordRequest("allowed", queryInfo.OperationType, time.Since(start))
+
 	// Forward to upstream — restore the body
 	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	r.ContentLength = int64(len(bodyBytes))
 
-	// Use a response modifier to capture the upstream response status
-	modifier := func(resp *http.Response) error {
-		metrics.RecordRequest("allowed", queryInfo.OperationType, time.Since(start))
-		return nil
-	}
-
-	proxy := httputil.NewSingleHostReverseProxy(h.upstreamURL)
-	proxy.ModifyResponse = modifier
-	proxy.ServeHTTP(w, r)
+	h.upstream.ServeHTTP(w, r)
 }

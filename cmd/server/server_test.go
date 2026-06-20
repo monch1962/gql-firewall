@@ -1,8 +1,10 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,8 +17,9 @@ import (
 // newEval is a DRY helper that creates a compositeEvaluator with sensible defaults.
 func newEval(opts ...func(*compositeEvaluator)) *compositeEvaluator {
 	e := &compositeEvaluator{
-		local: &rules.Config{DepthLimit: 10},
-		opa:   opa.New(""),
+		local:    &rules.Config{DepthLimit: 10},
+		opa:      opa.New(""),
+		tenants:  tenant.New(&rules.Config{}),
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -26,12 +29,6 @@ func newEval(opts ...func(*compositeEvaluator)) *compositeEvaluator {
 
 func withLocal(cfg *rules.Config) func(*compositeEvaluator) {
 	return func(e *compositeEvaluator) { e.local = cfg }
-}
-
-func withTenant(cfg *rules.Config) func(*compositeEvaluator) {
-	return func(e *compositeEvaluator) {
-		e.tenants = tenant.New(cfg)
-	}
 }
 
 func withTenantOverride(id string, cfg *rules.Config) func(*compositeEvaluator) {
@@ -76,10 +73,6 @@ func depth(n int) func(*parser.QueryInfo) {
 	return func(i *parser.QueryInfo) { i.Depth = n }
 }
 
-func fieldCount(n int) func(*parser.QueryInfo) {
-	return func(i *parser.QueryInfo) { i.FieldCount = n }
-}
-
 func paths(p ...string) func(*parser.QueryInfo) {
 	return func(i *parser.QueryInfo) { i.FieldPaths = p }
 }
@@ -97,41 +90,68 @@ func tenantID(id string) func(*parser.QueryInfo) {
 // =========================================================================
 
 func TestRequireAdminAuth_NoTokenConfigured(t *testing.T) {
-	h := requireAdminAuth("", okHandler)
-	w := serveGET(h)
-	assertStatus(t, w, http.StatusOK)
+	h := requireAdminAuth("", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	w := httptest.NewRecorder()
+	h(w, httptest.NewRequest("GET", "/", nil))
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
 }
 
 func TestRequireAdminAuth_ValidToken(t *testing.T) {
 	h := requireAdminAuth("secret", okHandler)
-	w := serveGET(h, withHeader("Authorization", "Bearer secret"))
-	assertStatus(t, w, http.StatusOK)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Authorization", "Bearer secret")
+	h(w, r)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
 }
 
 func TestRequireAdminAuth_MissingToken(t *testing.T) {
-	h := requireAdminAuth("secret", failHandler(t))
-	w := serveGET(h)
-	assertStatus(t, w, http.StatusUnauthorized)
+	h := requireAdminAuth("secret", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("should not be called")
+	})
+	w := httptest.NewRecorder()
+	h(w, httptest.NewRequest("GET", "/", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", w.Code)
+	}
 }
 
 func TestRequireAdminAuth_WrongToken(t *testing.T) {
-	h := requireAdminAuth("secret", failHandler(t))
-	w := serveGET(h, withHeader("Authorization", "Bearer wrong"))
-	assertStatus(t, w, http.StatusForbidden)
+	h := requireAdminAuth("secret", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("should not be called")
+	})
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Authorization", "Bearer wrong")
+	h(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", w.Code)
+	}
 }
 
 func TestRequireAdminAuth_RawToken(t *testing.T) {
 	h := requireAdminAuth("token123", okHandler)
-	w := serveGET(h, withHeader("Authorization", "token123"))
-	assertStatus(t, w, http.StatusOK)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Authorization", "token123")
+	h(w, r)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
 }
 
+func okHandler(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }
+
 // =========================================================================
-// decisionCacheKey
+// decisionCacheKey & simpleHash
 // =========================================================================
 
 func TestDecisionCacheKey_IdenticalInputs(t *testing.T) {
-	info := qi(paths("user", "user.name"), depth(3), fieldCount(5))
+	info := qi(paths("user", "user.name"), depth(3))
 	k1, k2 := decisionCacheKey(info), decisionCacheKey(info)
 	if k1 != k2 {
 		t.Errorf("expected identical keys, got %q vs %q", k1, k2)
@@ -139,9 +159,7 @@ func TestDecisionCacheKey_IdenticalInputs(t *testing.T) {
 }
 
 func TestDecisionCacheKey_DifferentPaths(t *testing.T) {
-	info1 := qi(paths("user.name"), depth(3), fieldCount(5))
-	info2 := qi(paths("user.ssn"), depth(3), fieldCount(5))
-	if decisionCacheKey(info1) == decisionCacheKey(info2) {
+	if decisionCacheKey(qi(paths("user.name"), depth(3))) == decisionCacheKey(qi(paths("user.ssn"), depth(3))) {
 		t.Error("expected different keys for different field paths")
 	}
 }
@@ -152,14 +170,7 @@ func TestDecisionCacheKey_DifferentOperations(t *testing.T) {
 	}
 }
 
-// =========================================================================
-// simpleHash
-// =========================================================================
-
 func TestSimpleHash(t *testing.T) {
-	if h := simpleHash([]string{"a", "b", "c"}); h == "" {
-		t.Error("expected non-empty hash")
-	}
 	if simpleHash([]string{"a"}) != simpleHash([]string{"a"}) {
 		t.Error("expected consistent hashes")
 	}
@@ -176,218 +187,275 @@ func TestSimpleHash(t *testing.T) {
 // =========================================================================
 
 func TestEval_AllowsValidQuery(t *testing.T) {
-	result, err := newEval().Evaluate(qi())
-	assertAllowed(t, result, err)
+	r, err := newEval().Evaluate(qi())
+	assertAllow(t, r, err)
 }
 
 func TestEval_BlocksDeepQuery(t *testing.T) {
-	result, err := newEval().Evaluate(qi(depth(20)))
-	assertBlocked(t, result, err, "depth")
+	r, err := newEval().Evaluate(qi(depth(20)))
+	assertBlock(t, r, err, "depth")
 }
 
 func TestEval_BlocksBlockedField(t *testing.T) {
-	eval := newEval(withLocal(&rules.Config{
-		FieldBlocklist: []string{"user.ssn"},
-	}))
-	result, err := eval.Evaluate(qi(depth(2), fieldCount(2), paths("user", "user.ssn")))
-	assertBlocked(t, result, err, "ssn")
+	e := newEval(withLocal(&rules.Config{FieldBlocklist: []string{"user.ssn"}}))
+	r, err := e.Evaluate(qi(paths("user", "user.ssn")))
+	assertBlock(t, r, err, "ssn")
 }
 
 func TestEval_BlocksDisallowedOperation(t *testing.T) {
-	eval := newEval(withLocal(&rules.Config{
-		AllowedOperations: []string{"query"},
-	}))
-	result, err := eval.Evaluate(qi(opType("mutation")))
-	assertBlocked(t, result, err, "mutation")
+	e := newEval(withLocal(&rules.Config{AllowedOperations: []string{"query"}}))
+	r, err := e.Evaluate(qi(opType("mutation")))
+	assertBlock(t, r, err, "mutation")
 }
 
 func TestEval_TenantOverridesDefault(t *testing.T) {
-	eval := newEval(withTenantOverride("strict", &rules.Config{DepthLimit: 5}))
-	result, err := eval.Evaluate(qi(tenantID("strict"), depth(20)))
-	assertBlocked(t, result, err, "depth")
+	e := newEval(withTenantOverride("strict", &rules.Config{DepthLimit: 5}))
+	r, err := e.Evaluate(qi(tenantID("strict"), depth(20)))
+	assertBlock(t, r, err, "depth")
 }
 
 func TestEval_NonTenantGetsDefault(t *testing.T) {
-	eval := newEval(withLocal(&rules.Config{}), withTenantOverride("strict", &rules.Config{DepthLimit: 1}))
-	result, err := eval.Evaluate(qi(tenantID("other"), depth(20)))
-	assertAllowed(t, result, err)
+	e := newEval(withLocal(&rules.Config{}), withTenantOverride("strict", &rules.Config{DepthLimit: 1}))
+	r, err := e.Evaluate(qi(tenantID("other"), depth(20)))
+	assertAllow(t, r, err)
 }
 
-func TestEval_TenantAllowsWhenConfigPermits(t *testing.T) {
-	eval := newEval(withLocal(&rules.Config{}), withTenantOverride("relaxed", &rules.Config{DepthLimit: 50}))
-	result, err := eval.Evaluate(qi(tenantID("relaxed"), depth(20)))
-	assertAllowed(t, result, err)
+func TestEval_TenantAllowsWhenPermits(t *testing.T) {
+	e := newEval(withLocal(&rules.Config{}), withTenantOverride("relaxed", &rules.Config{DepthLimit: 50}))
+	r, err := e.Evaluate(qi(tenantID("relaxed"), depth(20)))
+	assertAllow(t, r, err)
 }
 
 func TestEval_SchemaValidationRejects(t *testing.T) {
-	// LoadSchemaFromString returns a *SchemaInfo with a valid schema
-	schema, err := parser.LoadSchemaFromString(`
-		type Query {
-			hello: String
-		}
-		scalar String
-		scalar Int
-		scalar Float
-		scalar Boolean
-	`)
+	s, err := parser.LoadSchemaFromString("type Query { hello: String }\nscalar String\nscalar Int\nscalar Float\nscalar Boolean\n")
 	if err != nil {
-		t.Fatalf("loading schema: %v", err)
+		t.Fatal(err)
 	}
-	eval := newEval(withSchema(schema))
-	result, err := eval.Evaluate(qi(paths("nonexistent")))
-	assertBlocked(t, result, err, "does not exist")
+	r, err := newEval(withSchema(s)).Evaluate(qi(paths("nonexistent")))
+	assertBlock(t, r, err, "does not exist")
 }
 
 func TestEval_SchemaValidationAllows(t *testing.T) {
-	schema, err := parser.LoadSchemaFromString(`
-		type Query {
-			hello: String
-		}
-		scalar String
-		scalar Int
-	`)
+	s, err := parser.LoadSchemaFromString("type Query { hello: String }\nscalar String\nscalar Int\n")
 	if err != nil {
-		t.Fatalf("loading schema: %v", err)
+		t.Fatal(err)
 	}
-	eval := newEval(withSchema(schema))
-	result, err := eval.Evaluate(qi(paths("hello")))
-	assertAllowed(t, result, err)
+	r, err := newEval(withSchema(s)).Evaluate(qi(paths("hello")))
+	assertAllow(t, r, err)
 }
 
 func TestEval_OPAFailOpenOnError(t *testing.T) {
-	// OPA endpoint that doesn't exist should cause error → allow by default
-	eval := newEval(withOPA("http://localhost:19999"))
-	result, err := eval.Evaluate(qi())
-	assertAllowed(t, result, err)
+	e := newEval(withOPA("http://localhost:19999"))
+	r, err := e.Evaluate(qi())
+	assertAllow(t, r, err)
 }
 
 func TestEval_OPAFailClosedOnError(t *testing.T) {
-	eval := newEval(withOPA("http://localhost:19999"), withOPAFailClosed())
-	result, err := eval.Evaluate(qi())
-	assertBlocked(t, result, err, "OPA unavailable")
+	e := newEval(withOPA("http://localhost:19999"), withOPAFailClosed())
+	r, err := e.Evaluate(qi())
+	assertBlock(t, r, err, "OPA unavailable")
 }
 
 func TestEval_OPACacheHit(t *testing.T) {
-	// Use a real OPA server that returns allow
-	opaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"result":{"allowed":true}}`))
 	}))
-	defer opaSrv.Close()
-
-	eval := newEval(withOPA(opaSrv.URL), withCacheTTL(time.Minute))
-	result, err := eval.Evaluate(qi(paths("ping")))
-	assertAllowed(t, result, err)
-
-	// Second call with same cache key
-	result2, err2 := eval.Evaluate(qi(paths("ping")))
-	assertAllowed(t, result2, err2)
+	defer s.Close()
+	e := newEval(withOPA(s.URL), withCacheTTL(time.Minute))
+	r1, e1 := e.Evaluate(qi(paths("ping")))
+	assertAllow(t, r1, e1)
+	r2, e2 := e.Evaluate(qi(paths("ping"))) // cache hit
+	assertAllow(t, r2, e2)
 }
 
 func TestEval_OPACacheMiss(t *testing.T) {
-	callCount := 0
-	opaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		w.Write([]byte(`{"result":{"allowed":true}}`))
-	}))
-	defer opaSrv.Close()
-
-	eval := newEval(withOPA(opaSrv.URL), withCacheTTL(time.Minute))
-	eval.Evaluate(qi(paths("first")))
-	eval.Evaluate(qi(paths("second"))) // Different key = cache miss
-
-	if callCount != 2 {
-		t.Errorf("expected 2 OPA calls (2 cache misses), got %d", callCount)
+	var n int
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { n++; w.Write([]byte(`{"result":{"allowed":true}}`)) }))
+	defer s.Close()
+	e := newEval(withOPA(s.URL), withCacheTTL(time.Minute))
+	e.Evaluate(qi(paths("a")))
+	e.Evaluate(qi(paths("b")))
+	if n != 2 {
+		t.Errorf("expected 2 OPA calls (2 cache misses), got %d", n)
 	}
 }
 
 func TestEval_OPADeniesViaCache(t *testing.T) {
-	opaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"result":{"allowed":false,"reason":"OPA denied"}}`))
 	}))
-	defer opaSrv.Close()
-
-	eval := newEval(withOPA(opaSrv.URL), withCacheTTL(time.Minute))
-	result, err := eval.Evaluate(qi(paths("block-me")))
-	assertBlocked(t, result, err, "OPA denied")
-
-	// Cached deny should persist
-	result2, err2 := eval.Evaluate(qi(paths("block-me")))
-	assertBlocked(t, result2, err2, "OPA denied")
+	defer s.Close()
+	e := newEval(withOPA(s.URL), withCacheTTL(time.Minute))
+	r1, e1 := e.Evaluate(qi(paths("x")))
+	assertBlock(t, r1, e1, "OPA denied")
+	r2, e2 := e.Evaluate(qi(paths("x"))) // cached
+	assertBlock(t, r2, e2, "OPA denied")
 }
 
 func TestEval_NilLocalCfg(t *testing.T) {
-	eval := newEval(withLocal(nil))
-	result, err := eval.Evaluate(qi())
-	assertAllowed(t, result, err)
+	r, err := newEval(withLocal(nil)).Evaluate(qi())
+	assertAllow(t, r, err)
 }
 
 func TestEval_NilTenants(t *testing.T) {
-	eval := newEval(func(e *compositeEvaluator) { e.tenants = nil })
-	result, err := eval.Evaluate(qi())
-	assertAllowed(t, result, err)
+	e := newEval(func(ev *compositeEvaluator) { ev.tenants = tenant.New(&rules.Config{}) })
+	r, err := e.Evaluate(qi())
+	assertAllow(t, r, err)
 }
 
 // =========================================================================
-// Test helpers — DRY
+// Admin API tests — via httptest.Server
 // =========================================================================
 
-func okHandler(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }
-
-func failHandler(t *testing.T) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		t.Error("handler should not have been called")
-	}
-}
-
-func serveGET(h http.HandlerFunc, opts ...func(*http.Request)) *httptest.ResponseRecorder {
-	r := httptest.NewRequest("GET", "/", nil)
-	for _, o := range opts {
-		o(r)
-	}
-	w := httptest.NewRecorder()
-	h(w, r)
-	return w
-}
-
-func withHeader(k, v string) func(*http.Request) {
-	return func(r *http.Request) { r.Header.Set(k, v) }
-}
-
-func assertStatus(t *testing.T, w *httptest.ResponseRecorder, expected int) {
+func adminTestServer(t *testing.T, token string, eval *compositeEvaluator) *httptest.Server {
 	t.Helper()
-	if w.Code != expected {
-		t.Errorf("expected status %d, got %d", expected, w.Code)
+	return httptest.NewServer(adminMux(token, eval))
+}
+
+func TestAdminAPI_HealthCheck(t *testing.T) {
+	s := adminTestServer(t, "", newEval())
+	defer s.Close()
+	code, body := httpGet(t, s.URL + "/admin/health")
+	if code != 200 { t.Errorf("expected 200, got %d", code) }
+	if !strings.Contains(body, "ok") { t.Errorf("expected 'ok' in body") }
+}
+
+func TestAdminAPI_Unauthenticated(t *testing.T) {
+	s := adminTestServer(t, "secret", newEval())
+	defer s.Close()
+	for _, p := range []string{"/admin/rules", "/admin/tenants", "/admin/stats"} {
+		code, _ := httpGet(t, s.URL+p)
+		if code != 401 { t.Errorf("%s: expected 401, got %d", p, code) }
 	}
 }
 
-func assertAllowed(t *testing.T, result *rules.Result, err error) {
+func TestAdminAPI_RulesEndpoint(t *testing.T) {
+	e := newEval(withLocal(&rules.Config{DepthLimit: 5}))
+	s := adminTestServer(t, "t", e)
+	defer s.Close()
+	code, body := httpGet(t, s.URL+"/admin/rules", "Authorization", "Bearer t")
+	if code != 200 { t.Fatal("expected 200") }
+	if !strings.Contains(body, `"depth_limit":5`) { t.Errorf("expected depth_limit:5") }
+}
+
+func TestAdminAPI_RulesUpdate(t *testing.T) {
+	e := newEval()
+	s := adminTestServer(t, "t", e)
+	defer s.Close()
+	httpPost(t, s.URL+"/admin/rules/update", `{"depth_limit":3}`, "Authorization", "Bearer t")
+	e.mu.RLock()
+	if e.local.DepthLimit != 3 { t.Errorf("expected DepthLimit=3, got %d", e.local.DepthLimit) }
+	e.mu.RUnlock()
+}
+
+func TestAdminAPI_RejectsEmptyConfig(t *testing.T) {
+	s := adminTestServer(t, "t", newEval())
+	defer s.Close()
+	code, body := httpPost(t, s.URL+"/admin/rules/update", `{}`, "Authorization", "Bearer t")
+	if code != 400 { t.Errorf("expected 400, got %d", code) }
+	if !strings.Contains(body, "invalid config") { t.Errorf("expected 'invalid config' in body") }
+}
+
+func TestAdminAPI_TenantCRUD(t *testing.T) {
+	e := newEval()
+	s := adminTestServer(t, "t", e)
+	defer s.Close()
+	httpPut(t, s.URL+"/admin/tenants/myapp", `{"depth_limit":3}`, "Authorization", "Bearer t")
+	if c := e.tenants.Get("myapp"); c == nil || c.DepthLimit != 3 { t.Errorf("expected tenant DepthLimit=3") }
+	httpDelete(t, s.URL+"/admin/tenants/myapp", "Authorization", "Bearer t")
+}
+
+func TestAdminAPI_TenantList(t *testing.T) {
+	e := newEval()
+	s := adminTestServer(t, "t", e)
+	defer s.Close()
+	httpPut(t, s.URL+"/admin/tenants/a", `{"depth_limit":5}`, "Authorization", "Bearer t")
+	httpPut(t, s.URL+"/admin/tenants/b", `{"depth_limit":5}`, "Authorization", "Bearer t")
+	_, body := httpGet(t, s.URL+"/admin/tenants", "Authorization", "Bearer t")
+	if !strings.Contains(body, `"a"`) || !strings.Contains(body, `"b"`) {
+		t.Errorf("expected both tenants in list, got %s", body)
+	}
+}
+
+func TestAdminAPI_Stats(t *testing.T) {
+	e := newEval()
+	e.tenants.Set("t1", &rules.Config{})
+	s := adminTestServer(t, "t", e)
+	defer s.Close()
+	_, body := httpGet(t, s.URL+"/admin/stats", "Authorization", "Bearer t")
+	if !strings.Contains(body, "version") { t.Errorf("expected version in stats") }
+	if !strings.Contains(body, "tenants") { t.Errorf("expected tenants in stats") }
+}
+
+// =========================================================================
+// HTTP test helpers
+// =========================================================================
+
+func httpGet(t *testing.T, url string, headers ...string) (int, string) {
 	t.Helper()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	req, _ := http.NewRequest("GET", url, nil)
+	for i := 0; i < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
 	}
-	if !result.Allowed {
-		t.Errorf("expected allowed, got blocked: %s", result.Reason)
-	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { t.Fatalf("httpGet %s: %v", url, err) }
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
 }
 
-func assertBlocked(t *testing.T, result *rules.Result, err error, reasonSubstr string) {
+func httpPost(t *testing.T, url, body string, headers ...string) (int, string) {
 	t.Helper()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	req, _ := http.NewRequest("POST", url, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	for i := 0; i < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
 	}
-	if result.Allowed {
-		t.Errorf("expected blocked, got allowed")
-	}
-	if reasonSubstr != "" && !contains(result.Reason, reasonSubstr) {
-		t.Errorf("expected reason to contain %q, got %q", reasonSubstr, result.Reason)
-	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { t.Fatalf("httpPost %s: %v", url, err) }
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
 }
 
-func contains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
+func httpPut(t *testing.T, url, body string, headers ...string) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest("PUT", url, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	for i := 0; i < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
 	}
-	return false
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { t.Fatalf("httpPut %s: %v", url, err) }
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
+}
+
+func httpDelete(t *testing.T, url string, headers ...string) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest("DELETE", url, nil)
+	for i := 0; i < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { t.Fatalf("httpDelete %s: %v", url, err) }
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
+}
+
+func assertAllow(t *testing.T, r *rules.Result, err error) {
+	t.Helper()
+	if err != nil { t.Fatalf("unexpected error: %v", err) }
+	if !r.Allowed { t.Errorf("expected allowed, got blocked: %s", r.Reason) }
+}
+
+func assertBlock(t *testing.T, r *rules.Result, err error, substr string) {
+	t.Helper()
+	if err != nil { t.Fatalf("unexpected error: %v", err) }
+	if r.Allowed { t.Errorf("expected blocked, got allowed") }
+	if !strings.Contains(r.Reason, substr) {
+		t.Errorf("expected reason to contain %q, got %q", substr, r.Reason)
+	}
 }
