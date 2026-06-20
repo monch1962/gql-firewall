@@ -75,13 +75,28 @@ type Handler struct {
 
 // New creates a new proxy handler that forwards to upstreamURL after
 // evaluating requests through the provided evaluator.
-func New(upstreamURL string, evaluator Evaluator) *Handler {
-	u, _ := url.Parse(upstreamURL)
+func New(upstreamURL string, evaluator Evaluator) (*Handler, error) {
+	u, err := url.Parse(upstreamURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid upstream URL %q: %w", upstreamURL, err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return nil, fmt.Errorf("invalid upstream URL %q: must include scheme and host", upstreamURL)
+	}
 	return &Handler{
 		upstream:     httputil.NewSingleHostReverseProxy(u),
 		evaluator:    evaluator,
 		MaxBodyBytes: DefaultMaxBodyBytes,
+	}, nil
+}
+
+// MustNew is like New but panics on error. Used in tests and bootstrap code.
+func MustNew(upstreamURL string, evaluator Evaluator) *Handler {
+	h, err := New(upstreamURL, evaluator)
+	if err != nil {
+		panic(err)
 	}
+	return h
 }
 
 // ServeHTTP implements http.Handler.

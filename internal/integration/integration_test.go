@@ -63,7 +63,7 @@ func TestFullPipeline_AllowQuery(t *testing.T) {
 	os.WriteFile(cfgPath, []byte(`{"depth_limit": 5, "max_field_count": 20}`), 0644)
 	cfg, _ := config.Load(cfgPath)
 
-	handler := proxy.New(upstream.URL, &evalConfig{cfg})
+	handler, _ := proxy.New(upstream.URL, &evalConfig{cfg})
 	req := httptest.NewRequest("POST", "/graphql",
 		bytes.NewReader([]byte(`{"query": "{ hello }"}`)))
 	req.Header.Set("Content-Type", "application/json")
@@ -88,7 +88,7 @@ func TestFullPipeline_BlockDeepQuery(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := &rules.Config{DepthLimit: 3}
-	handler := proxy.New(upstream.URL, &evalConfig{cfg})
+	handler, _ := proxy.New(upstream.URL, &evalConfig{cfg})
 
 	req := httptest.NewRequest("POST", "/graphql",
 		bytes.NewReader([]byte(`{"query": "{ a { b { c { d } } } }"}`)))
@@ -110,7 +110,7 @@ func TestFullPipeline_BlockSSNField(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := &rules.Config{FieldBlocklist: []string{"user.ssn"}}
-	handler := proxy.New(upstream.URL, &evalConfig{cfg})
+	handler, _ := proxy.New(upstream.URL, &evalConfig{cfg})
 
 	req := httptest.NewRequest("POST", "/graphql",
 		bytes.NewReader([]byte(`{"query": "{ user { name ssn } }"}`)))
@@ -139,7 +139,7 @@ func TestFullPipeline_OPAIntegration(t *testing.T) {
 	defer upstream.Close()
 
 	opaClient := opa.New(opaSrv.URL)
-	handler := proxy.New(upstream.URL, &evalConfigAndOPA{
+	handler, _ := proxy.New(upstream.URL, &evalConfigAndOPA{
 		local: &rules.Config{},
 		opa:   opaClient,
 	})
@@ -170,7 +170,7 @@ func TestFullPipeline_OPABlocks(t *testing.T) {
 	defer upstream.Close()
 
 	opaClient := opa.New(opaSrv.URL)
-	handler := proxy.New(upstream.URL, &evalConfigAndOPA{
+	handler, _ := proxy.New(upstream.URL, &evalConfigAndOPA{
 		local: &rules.Config{},
 		opa:   opaClient,
 	})
@@ -194,7 +194,7 @@ func TestFullPipeline_InvalidGraphQL(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := proxy.New(upstream.URL, &evalConfig{&rules.Config{}})
+	handler, _ := proxy.New(upstream.URL, &evalConfig{&rules.Config{}})
 
 	req := httptest.NewRequest("POST", "/graphql",
 		bytes.NewReader([]byte(`{"query": "{ invalid !!! }"}`)))
@@ -216,7 +216,7 @@ func TestFullPipeline_BlockMutation(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := &rules.Config{BlockedOperations: []string{"mutation"}}
-	handler := proxy.New(upstream.URL, &evalConfig{cfg})
+	handler, _ := proxy.New(upstream.URL, &evalConfig{cfg})
 
 	req := httptest.NewRequest("POST", "/graphql",
 		bytes.NewReader([]byte(`{"query": "mutation { deleteUser(id: 1) { id } }"}`)))
@@ -237,7 +237,7 @@ func TestFullPipeline_HealthPassthrough(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := proxy.New(upstream.URL, &evalConfig{&rules.Config{}})
+	handler, _ := proxy.New(upstream.URL, &evalConfig{&rules.Config{}})
 	req := httptest.NewRequest("GET", "/health", nil)
 
 	w := httptest.NewRecorder()
@@ -258,7 +258,7 @@ func TestFullPipeline_FieldAllowlist(t *testing.T) {
 	cfg := &rules.Config{
 		FieldAllowlist: []string{"user.name", "user.email"},
 	}
-	handler := proxy.New(upstream.URL, &evalConfig{cfg})
+	handler, _ := proxy.New(upstream.URL, &evalConfig{cfg})
 
 	req := httptest.NewRequest("POST", "/graphql",
 		bytes.NewReader([]byte(`{"query": "{ user { ssn } }"}`)))

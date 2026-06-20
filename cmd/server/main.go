@@ -98,7 +98,10 @@ func main() {
 	}
 
 	// Create the proxy handler with body size limit (H-6 fix)
-	handler := proxy.New(*upstreamURL, evaluator)
+	handler, err := proxy.New(*upstreamURL, evaluator)
+	if err != nil {
+		log.Fatalf("invalid upstream URL: %v", err)
+	}
 	handler.MaxBodyBytes = *maxBodyMB * 1024 * 1024
 
 	// Build main mux — proxy

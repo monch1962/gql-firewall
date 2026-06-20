@@ -35,7 +35,7 @@ func TestAttack_DuplicateContentTypeFirstValid(t *testing.T) {
 	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	defer up.Close()
 
-	h := New(up.URL, passEval2)
+	h := MustNew(up.URL, passEval2)
 	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader(mustJSON(graphQLBody{Query: "{ hello }"})))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Add("Content-Type", "text/plain")
@@ -59,7 +59,7 @@ func TestAttack_BlockedResponseIsValidJSON(t *testing.T) {
 		"evil\t\b\f\r",
 	}
 	for _, reason := range reasons {
-		h := New(up.URL, &stubEvaluator2{result: &rules.Result{Allowed: false, Reason: reason}})
+		h := MustNew(up.URL, &stubEvaluator2{result: &rules.Result{Allowed: false, Reason: reason}})
 		req := httptest.NewRequest("POST", "/graphql", bytes.NewReader(mustJSON(graphQLBody{Query: "{ hello }"})))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()

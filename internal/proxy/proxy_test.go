@@ -80,7 +80,7 @@ func TestHandler_AllowsValidQuery(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := New(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
 
 	reqBody := `{"query": "{ hello }"}`
 	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(reqBody)))
@@ -105,7 +105,7 @@ func TestHandler_BlocksQuery(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := New(upstream.URL, &stubEvaluator{
+	handler := MustNew(upstream.URL, &stubEvaluator{
 		result: &rules.Result{
 			Allowed: false,
 			Reason:  "query depth exceeded",
@@ -142,7 +142,7 @@ func TestHandler_PassesHeaders(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := New(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
 
 	reqBody := `{"query": "{ ok }"}`
 	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(reqBody)))
@@ -165,7 +165,7 @@ func TestHandler_InvalidRequestBody(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := New(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
 
 	reqBody := `not-json`
 	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(reqBody)))
@@ -187,7 +187,7 @@ func TestHandler_NonPostRequests(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := New(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
 
 	// GET request should pass through without evaluation
 	req := httptest.NewRequest("GET", "/health", nil)
@@ -206,7 +206,7 @@ func TestHandler_MissingQueryField(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := New(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
 
 	// Valid JSON but missing "query" field
 	reqBody := `{"operationName": "Test", "variables": {}}`
@@ -229,7 +229,7 @@ func TestHandler_ForwardsUpstreamError(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := New(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
 
 	reqBody := `{"query": "{ hello }"}`
 	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(reqBody)))
@@ -254,7 +254,7 @@ func TestHandler_RejectsOversizedBody(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := New(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
 	handler.MaxBodyBytes = 1024 // 1KB limit for test
 
 	// Create a body larger than limit
@@ -283,7 +283,7 @@ func TestHandler_AcceptsBodyAtLimit(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := New(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
 	handler.MaxBodyBytes = 1024
 
 	bodyContent := make([]byte, 900)
@@ -310,7 +310,7 @@ func TestHandler_EvaluatorError(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := New(upstream.URL, &stubEvaluator{err: assertAnError{}})
+	handler := MustNew(upstream.URL, &stubEvaluator{err: assertAnError{}})
 
 	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(`{"query": "{ hello }"}`)))
 	req.Header.Set("Content-Type", "application/json")
@@ -336,7 +336,7 @@ func TestHandler_TenantExtraction(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := New(upstream.URL, &stubEvaluator{
+	handler := MustNew(upstream.URL, &stubEvaluator{
 		result: &rules.Result{Allowed: true},
 		evaluateHook: func(info *parser.QueryInfo) {
 			capturedTenant = info.TenantID
@@ -365,7 +365,7 @@ func TestHandler_NonGraphQLPost(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler := New(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
 
 	// POST to non-/graphql path should pass through without evaluation
 	req := httptest.NewRequest("POST", "/webhook", bytes.NewReader([]byte(`{"event": "test"}`)))

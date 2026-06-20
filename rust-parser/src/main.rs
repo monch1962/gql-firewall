@@ -3,6 +3,7 @@
 use async_graphql_parser::parse_query;
 use async_graphql_parser::types::*;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -124,9 +125,10 @@ fn analyze_query(query: &str) -> Result<QueryInfo, String> {
 
     let mut operation_type = "query".to_string();
     let mut operation_name: Option<String> = None;
+    let mut field_paths: Vec<String> = Vec::new();
     let mut depth: usize = 0;
     let mut field_count: usize = 0;
-    let mut field_paths: Vec<String> = Vec::new();
+    let mut visited_fragments: HashSet<String> = HashSet::new();
 
     // doc.operations provides an iterator over OperationDefinition
     for op in doc.operations.iter() {
@@ -162,7 +164,10 @@ fn analyze_query(query: &str) -> Result<QueryInfo, String> {
                     }
                     Selection::FragmentSpread(sp) => {
                         let frag_name = &sp.node.fragment_name.node;
-                        // Look up fragment in doc
+                        // Prevent infinite recursion on circular fragment refs (R19)
+                        if !visited_fragments.insert(frag_name.to_string()) {
+                            continue;
+                        }
                         if let Some(frag) = doc.fragments.get(frag_name) {
                             let frag_sel = &frag.node.selection_set.node;
                             if !frag_sel.items.is_empty() {
@@ -199,7 +204,23 @@ mod tests {
     #[test]
     fn test_named() { let r = analyze_query("query Q { x }").unwrap(); assert_eq!(r.operation_name, Some("Q".to_string())); }
     #[test]
-    fn test_invalid() { assert!(analyze_query("{ bad !!! }").is_err()); assert!(analyze_query("").is_err()); }
+    fn test_paths() {
+        let r = analyze_query("{ u { p { e } } }").unwrap();
+        assert!(r.field_paths.contains(&"u.p.e".to_string()));
+    }
+
     #[test]
-    fn test_paths() { let r = analyze_query("{ u { p { e } } }").unwrap(); assert!(r.field_paths.contains(&"u.p.e".to_string())); }
+    fn test_invalid() {
+        assert!(analyze_query("{ bad !!! }").is_err());
+        assert!(analyze_query("").is_err());
+    }
+
+    #[test]
+    fn test_circular_fragment_no_crash() {
+        // Circular fragment should not cause stack overflow (R19)
+        let q = "query { ...A } fragment A on Query { ...B } fragment B on Query { ...A }";
+        let r = analyze_query(q).unwrap();
+        // Should not crash; just verify it parsed without panic
+        let _ = r;
+    }
 }
