@@ -70,6 +70,7 @@ type Handler struct {
 	upstream     *httputil.ReverseProxy
 	evaluator    Evaluator
 	MaxBodyBytes int64
+	MaxCacheSize int // max entries in evaluator cache (0 = unlimited)
 }
 
 // New creates a new proxy handler that forwards to upstreamURL after

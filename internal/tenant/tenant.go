@@ -79,13 +79,24 @@ func ExtractTenantID(apiKey string) string {
 	if apiKey == "" {
 		return ""
 	}
-	// Walk backwards to find the LAST underscore
-	for i := len(apiKey) - 1; i > 0; i-- {
-		if apiKey[i] == '_' && i < len(apiKey)-1 {
+	// Walk backwards to find the LAST underscore that has
+	// non-underscore content on both sides
+	for i := len(apiKey) - 1; i >= 0; i-- {
+		if apiKey[i] == '_' && hasLeadingContent(apiKey[:i]) && i < len(apiKey)-1 {
 			return apiKey[:i]
 		}
 	}
 	return apiKey
+}
+
+// hasLeadingContent returns true if the string has at least one non-underscore character.
+func hasLeadingContent(s string) bool {
+	for i := range len(s) {
+		if s[i] != '_' && s[i] != ' ' {
+			return true
+		}
+	}
+	return false
 }
 
 // KeyStore maps tenant IDs to expected API key secrets and provides
