@@ -37,6 +37,24 @@ func TestDefaultMaxBodyBytes(t *testing.T) {
 	}
 }
 
+func TestSanitizeReason(t *testing.T) {
+	tests := []struct{ input, want string }{
+		{"simple message", "simple message"},
+		{`injected"`, `injected"`},            // double quote kept (safe via %q)
+		{"normal depth exceeded", "normal depth exceeded"},
+		{"blocked\x00nullbyte", "blockednullbyte"},
+		{"multi\nline", "multiline"},
+		{"tab	here", "tabhere"},
+		{"\x01\x02\x03BOM", "BOM"},
+	}
+	for _, tt := range tests {
+		got := sanitizeReason(tt.input)
+		if got != tt.want {
+			t.Errorf("sanitizeReason(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 type stubEvaluator struct {
 	result *rules.Result
 	err    error
