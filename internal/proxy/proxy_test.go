@@ -40,9 +40,14 @@ func TestDefaultMaxBodyBytes(t *testing.T) {
 type stubEvaluator struct {
 	result *rules.Result
 	err    error
+	// Optional hook to inspect the QueryInfo during evaluation
+	evaluateHook func(*parser.QueryInfo)
 }
 
 func (s *stubEvaluator) Evaluate(info *parser.QueryInfo) (*rules.Result, error) {
+	if s.evaluateHook != nil {
+		s.evaluateHook(info)
+	}
 	return s.result, s.err
 }
 
@@ -263,7 +268,6 @@ func TestHandler_AcceptsBodyAtLimit(t *testing.T) {
 	handler := New(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
 	handler.MaxBodyBytes = 1024
 
-	// Create a body exactly at the limit
 	bodyContent := make([]byte, 900)
 	for i := range bodyContent {
 		bodyContent[i] = 'x'
@@ -279,5 +283,79 @@ func TestHandler_AcceptsBodyAtLimit(t *testing.T) {
 	resp := w.Result()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200 for body at limit, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandler_EvaluatorError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream should not be called on eval error")
+	}))
+	defer upstream.Close()
+
+	handler := New(upstream.URL, &stubEvaluator{err: assertAnError{}})
+
+	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(`{"query": "{ hello }"}`)))
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500 for eval error, got %d", resp.StatusCode)
+	}
+}
+
+type assertAnError struct{}
+
+func (a assertAnError) Error() string { return "simulated eval error" }
+
+func TestHandler_TenantExtraction(t *testing.T) {
+	capturedTenant := ""
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data": {"ok": true}}`))
+	}))
+	defer upstream.Close()
+
+	handler := New(upstream.URL, &stubEvaluator{
+		result: &rules.Result{Allowed: true},
+		evaluateHook: func(info *parser.QueryInfo) {
+			capturedTenant = info.TenantID
+		},
+	})
+
+	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(`{"query": "{ hello }"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "myapp_secret123")
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if capturedTenant != "myapp" {
+		t.Errorf("expected tenant 'myapp', got %q", capturedTenant)
+	}
+}
+
+func TestHandler_NonGraphQLPost(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status": "passed"}`))
+	}))
+	defer upstream.Close()
+
+	handler := New(upstream.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+
+	// POST to non-/graphql path should pass through without evaluation
+	req := httptest.NewRequest("POST", "/webhook", bytes.NewReader([]byte(`{"event": "test"}`)))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 for non-graphql POST, got %d", resp.StatusCode)
 	}
 }
