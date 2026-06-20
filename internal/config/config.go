@@ -28,18 +28,3 @@ func Load(path string) (*rules.Config, error) {
 
 	return &cfg, nil
 }
-
-// Watch is deprecated — use the admin API instead.
-// Kept for backward compatibility; no longer used by the sidecar.
-func Watch(path string) (<-chan *rules.Config, error) {
-	if path == "" {
-		return nil, fmt.Errorf("config path is empty")
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		return nil, err
-	}
-	ch := make(chan *rules.Config, 1)
-	ch <- cfg
-	return ch, nil
-}

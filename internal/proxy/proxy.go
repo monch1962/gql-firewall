@@ -40,7 +40,7 @@ func sanitizeError(context string) string {
 }
 
 // sanitizeReason strips characters from a reason string that could break
-// JSON parsers or inject content into HTTP responses (R6 fix).
+// JSON parsers or inject content into HTTP responses.
 func sanitizeReason(reason string) string {
 	// Only allow printable ASCII, space, and common punctuation
 	var b strings.Builder

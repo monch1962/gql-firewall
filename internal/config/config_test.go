@@ -112,26 +112,3 @@ func TestLoadConfig_EmptyPath(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_WatchReturnsConfig(t *testing.T) {
-	// Watch() should return the initial config on the first read
-	dir := t.TempDir()
-	path := filepath.Join(dir, "rules.json")
-	content := `{"depth_limit": 3}`
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-
-	updates, err := Watch(path)
-	if err != nil {
-		t.Fatalf("Watch() returned error: %v", err)
-	}
-
-	// Should receive initial config
-	cfg, ok := <-updates
-	if !ok {
-		t.Fatal("expected initial config on watch channel")
-	}
-	if cfg.DepthLimit != 3 {
-		t.Errorf("expected DepthLimit=3, got %d", cfg.DepthLimit)
-	}
-}

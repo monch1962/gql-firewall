@@ -3,6 +3,7 @@ package metrics
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -55,7 +56,7 @@ func TestMetricsEndpoint(t *testing.T) {
 		"gql_firewall_rule_evaluations_total",
 	}
 	for _, name := range checks {
-		if !contains(body, name) {
+			if !strings.Contains(body, name) {
 			t.Errorf("expected metric %q in response", name)
 		}
 	}
@@ -66,16 +67,7 @@ func checkMetric(t *testing.T, name string) {
 	req := httptest.NewRequest("GET", "/metrics", nil)
 	w := httptest.NewRecorder()
 	Handler().ServeHTTP(w, req)
-	if !contains(w.Body.String(), name) {
+	if !strings.Contains(w.Body.String(), name) {
 		t.Errorf("expected metric %q in /metrics output", name)
 	}
-}
-
-func contains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

@@ -8,27 +8,19 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/monch1962/gql-firewall/internal/parser"
 	"github.com/monch1962/gql-firewall/internal/rules"
 )
 
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
+
 func gql(qry string) io.Reader {
 	return bytes.NewReader(mustJSON(graphQLBody{Query: qry}))
 }
 
-type stubEvaluator2 struct {
-	result *rules.Result
-	err    error
-}
-
-func (s *stubEvaluator2) Evaluate(info *parser.QueryInfo) (*rules.Result, error) {
-	return s.result, s.err
-}
-
-var passEval2 = &stubEvaluator2{result: &rules.Result{Allowed: true}}
+var passEval = &stubEvaluator{result: &rules.Result{Allowed: true}}
 
 func testUpstream(t *testing.T, handler func(http.ResponseWriter, *http.Request)) *httptest.Server {
+	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(handler))
 }
 
@@ -37,7 +29,7 @@ func TestAttack_MissingContentType(t *testing.T) {
 	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { t.Error("should not reach upstream") })
 	defer up.Close()
 
-	h := MustNew(up.URL, passEval2)
+	h := MustNew(up.URL, passEval)
 	req := httptest.NewRequest("POST", "/graphql", gql("{ hello }"))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -52,7 +44,7 @@ func TestAttack_WrongContentType(t *testing.T) {
 	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { t.Error("should not reach upstream") })
 	defer up.Close()
 
-	h := MustNew(up.URL, passEval2)
+	h := MustNew(up.URL, passEval)
 	req := httptest.NewRequest("POST", "/graphql", gql("{ hello }"))
 	req.Header.Set("Content-Type", "text/plain")
 	w := httptest.NewRecorder()
@@ -63,37 +55,25 @@ func TestAttack_WrongContentType(t *testing.T) {
 	}
 }
 
-// R3: Attack — uppercase /GRAPHQL should be intercepted by firewall (case-insensitive match)
+// R3: Attack — uppercase /GRAPHQL should be intercepted (case-insensitive match)
 func TestAttack_UppercasePath(t *testing.T) {
-	evaluated := false
-	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) {
-		// Firewall allowed it — that's correct after evaluation
-		w.WriteHeader(http.StatusOK)
-	})
+	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	defer up.Close()
 
-	eval := &stubEvaluator2{
-		result: &rules.Result{Allowed: true},
-	}
-	h := MustNew(up.URL, eval)
+	h := MustNew(up.URL, passEval)
 	req := httptest.NewRequest("POST", "/GRAPHQL", gql("{ hello }"))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
-	_ = evaluated
 	_ = w
 }
 
-// R4: Attack — path traversal (Go normalizes before our handler sees it)
+// R4: Attack — path traversal (Go normalizes before handler sees it)
 func TestAttack_PathTraversal(t *testing.T) {
-	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) {
-		// Go's HTTP server normalizes /graphql/../admin to /admin
-		// before ServeHTTP is called. This is expected behavior.
-		w.WriteHeader(http.StatusOK)
-	})
+	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	defer up.Close()
 
-	h := MustNew(up.URL, passEval2)
+	h := MustNew(up.URL, passEval)
 	req := httptest.NewRequest("POST", "/graphql/../admin/rules", gql("{ hello }"))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -103,13 +83,13 @@ func TestAttack_PathTraversal(t *testing.T) {
 	}
 }
 
-// R5: Attack — query string injection
+// R5: Attack — query string injection: /graphql?query={hello}
 func TestAttack_QueryStringInjection(t *testing.T) {
 	callCount := 0
 	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { callCount++; w.WriteHeader(http.StatusOK) })
 	defer up.Close()
 
-	h := MustNew(up.URL, passEval2)
+	h := MustNew(up.URL, passEval)
 	req := httptest.NewRequest("POST", "/graphql?query={hello}", bytes.NewReader([]byte(`{"operationName":"Test"}`)))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -125,8 +105,7 @@ func TestAttack_OPAReasonInjection(t *testing.T) {
 	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { t.Error("should not reach upstream") })
 	defer up.Close()
 
-	h := MustNew(up.URL, &stubEvaluator2{result: &rules.Result{Allowed: false, Reason: `injected"`}})
-
+	h := MustNew(up.URL, &stubEvaluator{result: &rules.Result{Allowed: false, Reason: `injected"`}})
 	req := httptest.NewRequest("POST", "/graphql", gql("{ hello }"))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -147,7 +126,7 @@ func TestAttack_DoubleContentType(t *testing.T) {
 	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { callCount++; w.WriteHeader(http.StatusOK) })
 	defer up.Close()
 
-	h := MustNew(up.URL, passEval2)
+	h := MustNew(up.URL, passEval)
 	req := httptest.NewRequest("POST", "/graphql", gql("{ hello }"))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Add("Content-Type", "text/html")
@@ -162,7 +141,7 @@ func TestAttack_GETWithGraphQLBody(t *testing.T) {
 	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { callCount++; w.WriteHeader(http.StatusOK) })
 	defer up.Close()
 
-	h := MustNew(up.URL, passEval2)
+	h := MustNew(up.URL, passEval)
 	req := httptest.NewRequest("GET", "/graphql", gql("{ hello }"))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -178,7 +157,7 @@ func TestAttack_EmptyBody(t *testing.T) {
 	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { t.Error("should not reach upstream") })
 	defer up.Close()
 
-	h := MustNew(up.URL, passEval2)
+	h := MustNew(up.URL, passEval)
 	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader(nil))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -194,7 +173,7 @@ func TestAttack_WhitespaceBody(t *testing.T) {
 	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { t.Error("should not reach upstream") })
 	defer up.Close()
 
-	h := MustNew(up.URL, passEval2)
+	h := MustNew(up.URL, passEval)
 	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte("   ")))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -210,7 +189,7 @@ func TestAttack_ValidJSONNoQuery(t *testing.T) {
 	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { t.Error("should not reach upstream") })
 	defer up.Close()
 
-	h := MustNew(up.URL, passEval2)
+	h := MustNew(up.URL, passEval)
 	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(`{"foo":"bar"}`)))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
