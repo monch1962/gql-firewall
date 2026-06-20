@@ -335,16 +335,16 @@ Request Flow
 
 ```
 gql-firewall/
-├── cmd/server/main.go            # Entry point — wires everything together
+├── cmd/server/main.go            # Entry point — wires everything together (+ test, 33 tests)
 ├── config/rules.json             # Sample firewall rules
 ├── internal/
-│   ├── parser/                   # GraphQL query analysis (16 tests)
-│   ├── rules/                    # Configurable rule evaluation (19 tests)
-│   ├── config/                   # JSON config loader + file watcher (7 tests)
+│   ├── parser/                   # GraphQL query analysis (25 tests)
+│   ├── rules/                    # Configurable rule evaluation (19+8 tests)
+│   ├── config/                   # JSON config loader (7 tests)
 │   ├── metrics/                  # Prometheus instrumentation (5 tests)
 │   ├── opa/                      # OPA sidecar client (7 tests)
-│   ├── proxy/                    # HTTP reverse proxy (7 tests)
-│   ├── tenant/                   # Per-tenant rules isolation (7 tests)
+│   ├── proxy/                    # HTTP reverse proxy (14 tests)
+│   ├── tenant/                   # Per-tenant rules isolation (11 tests)
 │   └── integration/              # End-to-end pipeline tests (9 tests)
 ├── rust-parser/                  # Rust hot-path parser (7 tests)
 │   ├── Cargo.toml
@@ -360,10 +360,11 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           79 tests  — parser, rules, config, metrics, opa client, tenant, proxy, integration
+Go:           138 tests — server(33), parser(25), rules(19+8), proxy(14), tenant(11),
+                    integration(9), config(7), opa(7), metrics(5)
 Rust:          7 tests  — parsing, depth, fields, paths, mutations, errors
 OPA/Rego:     35 tests  — 12 attack categories, edge cases, combined rules
-Total:       102 tests  — all passing
+Total:       180 tests  — all passing
 ```
 
 ```bash
