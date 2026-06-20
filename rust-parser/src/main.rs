@@ -74,7 +74,9 @@ fn run_http_sidecar(bind: &str, port: &str) {
     for mut request in server.incoming_requests() {
         let count = REQUEST_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
         let mut body = String::new();
-        if request.as_reader().read_to_string(&mut body).is_err() {
+        // Limit body size to 1MB to prevent OOM (R26 fix)
+        let mut limited = request.as_reader().take(1_048_576);
+        if limited.read_to_string(&mut body).is_err() {
             let _ = request.respond(
                 Response::from_string(r#"{"error":"cannot read body"}"#)
                     .with_status_code(400).with_header(json_hdr.clone()),
