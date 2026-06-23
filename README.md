@@ -558,7 +558,8 @@ services:
 The following features align with the product's business model — a standalone GraphQL firewall for mid-market API teams, Go-only binary with OPA-based policy, and an eventual acquisition path to Datadog, Kong, or Cloudflare.
 
 ### Learning Resources
-- **[Writing Custom OPA Policies](docs/opa-policy-tutorial.md)** — Hands-on tutorial with worked examples, testing guide, and reference for all input fields
+- **[Writing Custom OPA Policies](docs/opa-samples/tutorial.md)** — Hands-on tutorial with worked examples, testing guide, and reference for all input fields
+- **[25 Sample Policies](docs/opa-samples/)** — Runnable Rego files covering every attack category, tenant isolation, CIDR filtering, time-based access, and combined rules
 - **[OPA Policy Language](https://www.openpolicyagent.org/docs/latest/policy-language/)** — Official Rego reference
 
 
