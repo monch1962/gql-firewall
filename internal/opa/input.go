@@ -3,9 +3,6 @@ package opa
 import "github.com/monch1962/gql-firewall/internal/parser"
 
 // Input is the extended query information sent to OPA for evaluation.
-// All fields the Rego policies reference must be populated here.
-// Params and TenantConfig are populated by the Go sidecar from the DataStore
-// so the same policy works for both embedded and sidecar modes.
 type Input struct {
 	OperationType          string                 `json:"operation_type"`
 	OperationName          string                 `json:"operation_name,omitempty"`
@@ -26,7 +23,6 @@ type Input struct {
 }
 
 // BuildInput converts a parser.QueryInfo into the extended OPA Input.
-// Fields not yet populated by the parser are left as zero values.
 func BuildInput(info *parser.QueryInfo, store *DataStore) *Input {
 	input := &Input{
 		OperationType:          info.OperationType,
@@ -35,12 +31,12 @@ func BuildInput(info *parser.QueryInfo, store *DataStore) *Input {
 		FieldCount:             info.FieldCount,
 		FieldPaths:             info.FieldPaths,
 		TenantID:               info.TenantID,
-		Directives:             0,
-		BatchSize:              0,
-		ArgumentDepth:          0,
-		ListsRequested:         0,
-		FragmentSpreadCount:    0,
-		QueryHash:              "",
+		Directives:             info.Directives,
+		BatchSize:              info.BatchSize,
+		ArgumentDepth:          info.ArgumentDepth,
+		ListsRequested:         info.ListsRequested,
+		FragmentSpreadCount:    info.FragmentSpreadCount,
+		QueryHash:              info.QueryHash,
 		RequirePersistedQueries: false,
 		FieldAllowlist:         nil,
 	}

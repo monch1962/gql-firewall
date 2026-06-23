@@ -356,9 +356,9 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           203 tests — server(25), parser(45), proxy(37), integration(23), opa(63), metrics(6)
+Go:           216 tests — server(25), parser(52), proxy(37), integration(23), opa(63), metrics(6), ratelimit(6)
 OPA/Rego:     33 tests  — 12 attack categories, edge cases, combined rules
-Total:       236 tests  — all passing
+Total:       249 tests  — all passing
 ```
 
 ```bash

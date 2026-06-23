@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -19,6 +20,7 @@ import (
 	"github.com/monch1962/gql-firewall/internal/opa"
 	"github.com/monch1962/gql-firewall/internal/parser"
 	"github.com/monch1962/gql-firewall/internal/proxy"
+	"github.com/monch1962/gql-firewall/internal/ratelimit"
 )
 
 const version = "0.4.0"
@@ -40,11 +42,30 @@ func main() {
 		tlsCert         = flag.String("tls-cert", "", "Path to TLS certificate file (H-5 fix)")
 		tlsKey          = flag.String("tls-key", "", "Path to TLS private key file (H-5 fix)")
 		metricsListen   = flag.String("metrics-listen", "", "Separate listen address for metrics (M-4 fix)")
+		logFormat       = flag.String("log-format", "text", "Log format: text or json")
+		ratePerSec      = flag.Float64("rate-limit", 0, "Per-tenant/IP rate limit (requests/sec, 0 = disabled)")
+		rateBurst       = flag.Int("rate-burst", 0, "Rate limit burst size (0 = 2x rate-limit)")
 	)
 	flag.Parse()
 
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
-	log.Printf("gql-firewall v%s starting (listen=%s upstream=%s)", version, *listenAddr, *upstreamURL)
+	// Structured logging setup
+	var logHandler slog.Handler
+	switch *logFormat {
+	case "json":
+		logHandler = slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
+	default:
+		logHandler = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
+	}
+	slog.SetDefault(slog.New(logHandler))
+	log.SetFlags(0)
+	log.SetOutput(slog.NewLogLogger(logHandler, slog.LevelInfo).Writer())
+
+	slog.Info("starting",
+		"version", version,
+		"listen", *listenAddr,
+		"upstream", *upstreamURL,
+		"log_format", *logFormat,
+	)
 
 	// Validate: at least one OPA mode must be configured
 	if *opaEndpoint == "" && *opaEmbed == "" {
@@ -122,13 +143,30 @@ func main() {
 	// Create the proxy handler with body size limit (H-6 fix)
 	handler, err := proxy.New(*upstreamURL, evaluator)
 	if err != nil {
-		log.Fatalf("invalid upstream URL: %v", err)
+		slog.Error("invalid upstream URL", "error", err)
+		os.Exit(1)
 	}
 	handler.MaxBodyBytes = *maxBodyMB * 1024 * 1024
 
+	// Rate limiter (optional)
+	var rateLimitHandler http.Handler = handler
+	if *ratePerSec > 0 {
+		burst := *rateBurst
+		if burst <= 0 {
+			burst = int(*ratePerSec) * 2
+		}
+		rl := ratelimit.New(ratelimit.Config{
+			RequestsPerSecond: *ratePerSec,
+			Burst:             burst,
+		})
+		defer rl.Stop()
+		rateLimitHandler = rateLimitMiddleware(rl, handler)
+		slog.Info("rate limiting enabled", "req_per_sec", *ratePerSec, "burst", burst)
+	}
+
 	// Build main mux — proxy
 	mux := http.NewServeMux()
-	mux.Handle("/", handler)
+	mux.Handle("/", rateLimitHandler)
 
 	// Metrics on separate port or main port (M-4 fix)
 	if *metricsListen != "" {
@@ -186,6 +224,25 @@ func main() {
 			log.Fatalf("server error: %v", err)
 		}
 	}
+}
+
+// rateLimitMiddleware wraps an http.Handler with per-key token-bucket rate limiting.
+func rateLimitMiddleware(rl *ratelimit.Limiter, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := r.RemoteAddr
+		if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
+			key = apiKey
+		}
+		if !rl.Allow(key) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":"rate limit exceeded","retry_after":1}`))
+			slog.Warn("rate limit exceeded", "key", key, "path", r.URL.Path)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // requireAdminAuth is HTTP middleware for admin API authentication (C-1 fix).
