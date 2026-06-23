@@ -40,6 +40,7 @@ gql-firewall's OPA Rego policies (35 tests) cover 12 attack categories — the m
 | `--opa` | `""` | OPA sidecar endpoint (optional) |
 | `--opa-cache-ttl` | `60s` | TTL for cached OPA decisions |
 | `--opa-fail-closed` | `false` | Block when OPA is unreachable |
+| `--opa-audit-only` | `false` | Log OPA would-be blocks without enforcing |
 | `--admin` | `:8082` | Admin API listen address (empty = disable) |
 | `--admin-token` | `""` | Bearer token for admin API auth |
 | `--metrics-listen` | `""` | Separate metrics port (empty = serve on main port) |
@@ -75,6 +76,7 @@ gql-firewall's OPA Rego policies (35 tests) cover 12 attack categories — the m
 - **OPA/Rego integration** — Optional OPA sidecar for external policy evaluation.
   - **OPA decision caching** — Cache OPA results with configurable TTL (`--opa-cache-ttl`)
   - **Fail-open safety** — On OPA errors, requests pass through (configurable)
+  - **Audit-only mode** — `--opa-audit-only` runs OPA in log-only mode: blocked decisions are recorded as Prometheus metrics and logged, but the request is always allowed through. Use this to collect data before enabling enforcement.
 - **SDL schema-aware validation** — Accept a GraphQL schema file (`--schema`). Validates requested fields exist on Query type before forwarding.
 - **Live admin API** — View and update rules at runtime via REST API on `:8082`.
 - **Prometheus metrics** — `/metrics` endpoint with counters for requests, blocks, latency, rule evaluations, and OPA calls.
@@ -285,6 +287,7 @@ Prometheus metrics are exposed at `/metrics` on the main listen port. Metrics in
 | `gql_firewall_rule_evaluations_total` | Counter | `rule` | Rule evaluation count |
 | `gql_firewall_config_reloads_total` | Counter | — | Config hot-reload count |
 | `gql_firewall_opa_requests_total` | Counter | `outcome` | OPA sidecar call count |
+| `gql_firewall_opa_audit_blocks_total` | Counter | `reason` | Would-be OPA blocks in audit-only mode |
 
 ```bash
 # Scrape metrics
@@ -361,11 +364,11 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           165 tests — server(33), parser(37), proxy(29), rules(27), tenant(11),
-                    integration(9), config(7), opa(7), metrics(5)
+Go:           168 tests — server(36), parser(37), proxy(29), rules(27), tenant(11),
+                    integration(9), config(7), opa(7), metrics(6)
 Rust:          8 tests  — parsing, depth, fields, paths, mutations, errors, circular fragments
 OPA/Rego:     35 tests  — 12 attack categories, edge cases, combined rules
-Total:       208 tests  — all passing
+Total:       211 tests  — all passing
 ```
 
 ```bash

@@ -41,6 +41,7 @@ func main() {
 		tlsCert         = flag.String("tls-cert", "", "Path to TLS certificate file (H-5 fix)")
 		tlsKey          = flag.String("tls-key", "", "Path to TLS private key file (H-5 fix)")
 		metricsListen   = flag.String("metrics-listen", "", "Separate listen address for metrics (M-4 fix; empty = serve on main port)")
+		opaAuditOnly    = flag.Bool("opa-audit-only", false, "Run OPA in audit-only mode: log would-be blocks without enforcing")
 	)
 	flag.Parse()
 
@@ -75,7 +76,11 @@ func main() {
 	// Set up OPA client (optional)
 	opaClient := opa.New(*opaEndpoint)
 	if *opaEndpoint != "" {
-		log.Printf("OPA sidecar configured at %s (cache TTL: %s, fail-closed: %v)", *opaEndpoint, *cacheTTL, *opaFailClosed)
+		if *opaAuditOnly {
+			log.Printf("OPA sidecar configured at %s (AUDIT-ONLY — blocks are logged, not enforced; cache TTL: %s, fail-closed: %v)", *opaEndpoint, *cacheTTL, *opaFailClosed)
+		} else {
+			log.Printf("OPA sidecar configured at %s (cache TTL: %s, fail-closed: %v)", *opaEndpoint, *cacheTTL, *opaFailClosed)
+		}
 	} else {
 		log.Printf("no OPA endpoint configured — using local rules only")
 	}
@@ -90,6 +95,7 @@ func main() {
 		schema:        schemaDoc,
 		cacheTTL:      *cacheTTL,
 		opaFailClosed: *opaFailClosed,
+		opaAuditOnly:  *opaAuditOnly,
 	}
 
 	// Set up the admin API for live rule management
@@ -347,6 +353,7 @@ type compositeEvaluator struct {
 	cacheTTL      time.Duration
 	cache         map[string]cachedDecision
 	opaFailClosed bool
+	opaAuditOnly  bool
 }
 
 type cachedDecision struct {
@@ -418,6 +425,11 @@ func (c *compositeEvaluator) Evaluate(info *parser.QueryInfo) (*rules.Result, er
 			if cached, ok := c.cache[cacheKey]; ok && time.Now().Before(cached.expiry) {
 				c.mu.RUnlock()
 				metrics.RecordOPA("cache_hit")
+				if c.opaAuditOnly && !cached.result.Allowed {
+					metrics.RecordOPAAuditBlock(cached.result.Reason)
+					log.Printf("[AUDIT] OPA would block: %s (allowed in audit-only mode)", cached.result.Reason)
+					return &rules.Result{Allowed: true}, nil
+				}
 				return cached.result, nil
 			}
 			c.mu.RUnlock()
@@ -436,7 +448,13 @@ func (c *compositeEvaluator) Evaluate(info *parser.QueryInfo) (*rules.Result, er
 
 		metrics.RecordOPA("evaluated")
 		if !result.Allowed {
-			metrics.RecordBlock(result.Reason)
+			if c.opaAuditOnly {
+				metrics.RecordOPAAuditBlock(result.Reason)
+				log.Printf("[AUDIT] OPA would block: %s (allowed in audit-only mode)", result.Reason)
+				result = &rules.Result{Allowed: true}
+			} else {
+				metrics.RecordBlock(result.Reason)
+			}
 		}
 
 		if cacheTTL > 0 {

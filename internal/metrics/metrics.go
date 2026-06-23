@@ -53,6 +53,12 @@ var (
 		Name: "gql_firewall_opa_requests_total",
 		Help: "Total number of OPA sidecar requests, by outcome",
 	}, []string{"outcome"})
+
+	// OPAAuditBlocks counts requests that OPA would have blocked in audit-only mode.
+	OPAAuditBlocks = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gql_firewall_opa_audit_blocks_total",
+		Help: "Total number of requests OPA would have blocked (audit-only mode), by reason",
+	}, []string{"reason"})
 )
 
 // RecordRequest records a firewall decision.
@@ -74,6 +80,11 @@ func RecordRuleEval(rule string) {
 // RecordOPA records an OPA sidecar call result.
 func RecordOPA(outcome string) {
 	OPARequests.WithLabelValues(outcome).Inc()
+}
+
+// RecordOPAAuditBlock records a request that OPA would have blocked in audit-only mode.
+func RecordOPAAuditBlock(reason string) {
+	OPAAuditBlocks.WithLabelValues(reason).Inc()
 }
 
 // Handler returns an HTTP handler for the /metrics endpoint.

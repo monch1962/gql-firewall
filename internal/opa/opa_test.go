@@ -3,6 +3,7 @@ package opa
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/monch1962/gql-firewall/internal/parser"
@@ -142,21 +143,8 @@ func TestEvaluate_SendsQueryInfo(t *testing.T) {
 		t.Fatal("expected request body to be sent")
 	}
 	// Should contain query info fields
-	if !containsAny(receivedBody, "mutation", "CreateUser", "depth", "field_count") {
+	if !strings.Contains(receivedBody, "mutation") || !strings.Contains(receivedBody, "CreateUser") {
 		t.Errorf("request body missing query info fields: %s", receivedBody)
 	}
 }
 
-func containsAny(s string, substrs ...string) bool {
-	for _, sub := range substrs {
-		if len(sub) > 0 && s != "" {
-			// Simple substring check
-			for i := 0; i <= len(s)-len(sub); i++ {
-				if s[i:i+len(sub)] == sub {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
