@@ -18,10 +18,11 @@ type EmbedConfig struct {
 
 // EmbeddedEvaluator evaluates Rego policies in-process using the OPA Go library.
 type EmbeddedEvaluator struct {
-	mu        sync.RWMutex
-	prepared  *v1.PreparedEvalQuery
-	store     *DataStore
-	policy    string
+	mu          sync.RWMutex
+	prepared    *v1.PreparedEvalQuery
+	preparedDeny *v1.PreparedEvalQuery
+	store       *DataStore
+	policy      string
 }
 
 // NewEmbedded creates an embedded Rego evaluator.
@@ -54,18 +55,17 @@ func (e *EmbeddedEvaluator) Configured() bool {
 func (e *EmbeddedEvaluator) Evaluate(input *Input) (*Result, error) {
 	e.mu.RLock()
 	prepared := e.prepared
+	preparedDeny := e.preparedDeny
 	e.mu.RUnlock()
 
-	if prepared == nil {
+	if prepared == nil || preparedDeny == nil {
 		return nil, fmt.Errorf("embedded OPA evaluator not initialized")
 	}
 
 	ctx := context.Background()
 
-	// Evaluate the allow query
-	rs, err := prepared.Eval(ctx,
-		v1.EvalInput(input),
-	)
+	// Evaluate the allow query using the prepared (pre-compiled) query
+	rs, err := prepared.Eval(ctx, v1.EvalInput(input))
 	if err != nil {
 		return nil, fmt.Errorf("OPA evaluation error: %w", err)
 	}
@@ -83,12 +83,8 @@ func (e *EmbeddedEvaluator) Evaluate(input *Input) (*Result, error) {
 		return &Result{Allowed: true}, nil
 	}
 
-	// Denied — extract reason from deny set
-	denyRs, err := v1.New(
-		v1.Query("data.graphql.deny"),
-		v1.Module("graphql.rego", e.policy),
-		v1.Input(input),
-	).Eval(ctx)
+	// Denied — extract reason from deny set using the prepared deny query
+	denyRs, err := preparedDeny.Eval(ctx, v1.EvalInput(input))
 	if err != nil {
 		return &Result{Allowed: false, Reason: "blocked by OPA policy"}, nil
 	}
@@ -104,17 +100,32 @@ func (e *EmbeddedEvaluator) Evaluate(input *Input) (*Result, error) {
 	return &Result{Allowed: false, Reason: "blocked by OPA policy"}, nil
 }
 
-// compile pre-compiles the Rego policy for faster evaluation.
+// compile pre-compiles both the allow and deny queries for faster evaluation.
 func (e *EmbeddedEvaluator) compile() error {
+	ctx := context.Background()
+
+	// Pre-compile allow query
 	r := v1.New(
 		v1.Query("data.graphql.allow"),
 		v1.Module("graphql.rego", e.policy),
 	)
-	prepared, err := r.PrepareForEval(context.Background())
+	prepared, err := r.PrepareForEval(ctx)
 	if err != nil {
 		return err
 	}
 	e.prepared = &prepared
+
+	// Pre-compile deny query
+	rd := v1.New(
+		v1.Query("data.graphql.deny"),
+		v1.Module("graphql.rego", e.policy),
+	)
+	preparedDeny, err := rd.PrepareForEval(ctx)
+	if err != nil {
+		return err
+	}
+	e.preparedDeny = &preparedDeny
+
 	return nil
 }
 
