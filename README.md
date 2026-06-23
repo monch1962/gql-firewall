@@ -354,7 +354,7 @@ gql-firewall/
 ├── config/params.json             # Sample OPA parameters
 ├── internal/
 │   ├── parser/                    # GraphQL query analysis (37 tests, including 13 invalid-input tests)
-│   ├── opa/                       # OPA evaluator: sidecar, embedded, data store, input builder (24 tests)
+│   ├── opa/                       # OPA evaluator: sidecar, embedded, data store, input builder (63 tests)
 │   ├── metrics/                   # Prometheus instrumentation (6 tests)
 │   ├── proxy/                     # HTTP reverse proxy (29 tests, including 14 red-team attack tests)
 │   └── integration/               # End-to-end pipeline tests (4 tests)
@@ -372,10 +372,10 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           129 tests — server(25), parser(37), proxy(29), integration(4), opa(24), metrics(6)
+Go:           168 tests — server(25), parser(37), proxy(29), integration(4), opa(63), metrics(6)
 Rust:          8 tests  — parsing, depth, fields, paths, mutations, errors, circular fragments
 OPA/Rego:     33 tests  — 12 attack categories, edge cases, combined rules
-Total:       170 tests  — all passing
+Total:       209 tests  — all passing
 ```
 
 ```bash
