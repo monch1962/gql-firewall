@@ -42,6 +42,9 @@ gql-firewall's OPA Rego policies (33 tests) cover 12 attack categories:
 | `--opa-cache-ttl` | `60s` | TTL for cached OPA decisions |
 | `--opa-fail-closed` | `false` | Block when OPA is unreachable |
 | `--opa-audit-only` | `false` | Log OPA would-be blocks without enforcing |
+| `--log-format` | `text` | Log format: text or json |
+| `--rate-limit` | `0` | Per-tenant/IP rate limit (req/sec, 0 = disabled) |
+| `--rate-burst` | `0` | Rate limit burst size (0 = 2x rate-limit) |
 | `--admin` | `:8082` | Admin API listen address (empty = disable) |
 | `--admin-token` | `""` | Bearer token for admin API auth |
 | `--metrics-listen` | `""` | Separate metrics port (empty = serve on main port) |
@@ -344,6 +347,7 @@ gql-firewall/
 │   ├── opa/                       # OPA evaluator: sidecar, embedded, data store, input builder (63 tests)
 │   ├── metrics/                   # Prometheus instrumentation (6 tests)
 │   ├── proxy/                     # HTTP reverse proxy (29 tests, including 14 red-team attack tests)
+│   ├── ratelimit/                 # Token-bucket rate limiter (6 tests)
 │   └── integration/               # End-to-end pipeline tests (23 tests, including 19 e2e HTTP tests)
 ├── opa-policies/                  # OPA Rego policy templates (33 tests)
 │   ├── graphql.rego              # 12 attack categories, parameterized via input.params
@@ -356,9 +360,9 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           203 tests — server(25), parser(45), proxy(37), integration(23), opa(63), metrics(6)
+Go:           216 tests — server(25), parser(52), proxy(37), integration(23), opa(63), metrics(6), ratelimit(6)
 OPA/Rego:     33 tests  — 12 attack categories, edge cases, combined rules
-Total:       236 tests  — all passing
+Total:       249 tests  — all passing
 ```
 
 ```bash
