@@ -11,18 +11,11 @@ import (
 	"github.com/monch1962/gql-firewall/internal/opa"
 )
 
-func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
-
 func gql(qry string) io.Reader {
 	return bytes.NewReader(mustJSON(graphQLBody{Query: qry}))
 }
 
 var passEval = &stubEvaluator{result: &opa.Result{Allowed: true}}
-
-func testUpstream(t *testing.T, handler func(http.ResponseWriter, *http.Request)) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(handler))
-}
 
 // R1: Attack — missing Content-Type header
 func TestAttack_MissingContentType(t *testing.T) {

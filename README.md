@@ -346,8 +346,9 @@ gql-firewall/
 │   ├── parser/                    # GraphQL query analysis (45 tests, including Rust compat)
 │   ├── opa/                       # OPA evaluator: sidecar, embedded, data store, input builder (63 tests)
 │   ├── metrics/                   # Prometheus instrumentation (6 tests)
-│   ├── proxy/                     # HTTP reverse proxy (29 tests, including 14 red-team attack tests)
+│   ├── proxy/                     # HTTP reverse proxy (37 tests, including 14 red-team + 8 hardening)
 │   ├── ratelimit/                 # Token-bucket rate limiter (6 tests)
+│   ├── testutil/                  # Shared test helpers  
 │   └── integration/               # End-to-end pipeline tests (23 tests, including 19 e2e HTTP tests)
 ├── opa-policies/                  # OPA Rego policy templates (33 tests)
 │   ├── graphql.rego              # 12 attack categories, parameterized via input.params
