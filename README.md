@@ -1,6 +1,6 @@
 # gql-firewall
 
-A **GraphQL firewall sidecar** that intercepts, inspects, and secures GraphQL requests before they reach your upstream server. Built with Go (control plane) and optionally accelerated with Rust (hot-path parser), with OPA/Rego integration for policy-as-code — covering the [OWASP GraphQL Top 10](https://cheatsheetseries.owasp.org/cheatsheets/GraphQL_Cheat_Sheet.html) and common attack vectors.
+A **GraphQL firewall sidecar** that intercepts, inspects, and secures GraphQL requests before they reach your upstream server. Built entirely in Go with OPA/Rego integration for policy-as-code — covering the [OWASP GraphQL Top 10](https://cheatsheetseries.owasp.org/cheatsheets/GraphQL_Cheat_Sheet.html) and common attack vectors.
 
 ```
         ┌───────────┐    GraphQL     ┌──────────────┐  rules  ┌─────────┐
@@ -12,7 +12,7 @@ A **GraphQL firewall sidecar** that intercepts, inspects, and secures GraphQL re
 
 ## Attack Coverage
 
-gql-firewall's OPA Rego policies (35 tests) cover 12 attack categories — the most comprehensive GraphQL firewall policy set available as open source:
+gql-firewall's OPA Rego policies (33 tests) cover 12 attack categories:
 
 | # | Attack Vector | Detection | Status |
 |---|---|---|---|
@@ -66,7 +66,7 @@ gql-firewall's OPA Rego policies (35 tests) cover 12 attack categories — the m
 | **Graceful shutdown** | Built-in | Dropped requests on deploy (M-3) |
 
 ### Core
-- **GraphQL query parsing** — Parses queries, mutations, and subscriptions using `gqlparser` (Go) or `async-graphql-parser` (Rust). Extracts operation type, name, depth, field count, and full field paths.
+- **GraphQL query parsing** — Parses queries, mutations, and subscriptions using `gqlparser/v2`. Extracts operation type, name, depth, field count, and full field paths.
 - **OPA/Rego policy engine** — All firewall rules are expressed as Rego policies. Supports two deployment modes:
   - **Sidecar mode** (`--opa`): Evaluate policies via an OPA sidecar HTTP endpoint. Best for scale-out deployments.
   - **Embedded mode** (`--opa-embed`): Evaluate policies in-process using the OPA Go library. Zero external dependencies, ~10µs evaluation time.
@@ -76,16 +76,14 @@ gql-firewall's OPA Rego policies (35 tests) cover 12 attack categories — the m
 - **Live admin API** — View and update rules at runtime via REST API on `:8082`.
 - **Prometheus metrics** — `/metrics` endpoint with counters for requests, blocks, latency, rule evaluations, and OPA calls.
 - **Per-tenant policy isolation** — Each tenant (identified via `X-API-Key` header) can have its own rules configuration. Managed via admin API.
-- **Configurable hot-reload** — Watch rule files for changes or update via admin API — both apply without restart.
 
 ### Performance
-- **Go control plane** — Fast, memory-safe, goroutine-per-request. P99 <5ms with local rules.
-- **Rust hot-path parser** (optional) — Runs as an HTTP sidecar using `async-graphql-parser`. Sub-millisecond parsing latency.
+- **Pure Go binary** — Single static binary, no runtime dependencies. P99 <5ms with embedded OPA.
 - **OPA decision caching** — Avoids redundant OPA calls for repeated query patterns. ~200µs vs ~2ms RPC on cache hit.
 
 ### Security
 - **12 attack vectors covered** (see table above)
-- **Red-team verified** — 30 attack simulation tests across Go proxy and Rust parser. 7 real vulnerabilities found and patched (Content-Type bypass, case-sensitive path bypass, OPA reason injection, tenant ID extraction bug, Rust circular fragment crash, upstream URL validation, Rust HTTP body size).
+- **Red-team verified** — 30 attack simulation tests across the Go proxy. 7 real vulnerabilities found and patched.
 - **Deny-override model** — requests pass by default, blocked only by matching deny rules (safe for phased rollout)
 - **Sensitive field blocking** — SSN, passwords, credit cards, API keys, secrets
 - **Introspection blocking** — direct + nested paths
@@ -105,7 +103,6 @@ gql-firewall's OPA Rego policies (35 tests) cover 12 attack categories — the m
 
 ### Prerequisites
 - Go 1.23+ (for building)
-- Rust 1.75+ (optional, for hot-path parser)
 - OPA 1.0+ (optional, for policy evaluation — `opa test opa-policies/` validates)
 
 ### Install & Run
@@ -138,10 +135,6 @@ go build -o gql-firewall ./cmd/server/
   --listen :8081 \
   --admin :8082 \
   --opa-cache-ttl 60s
-
-# With Rust hot-path parser sidecar
-./rust-parser/target/release/gql-parser --listen 9090 &
-./gql-firewall --upstream http://localhost:8080 --listen :8081
 ```
 
 ### Test It
@@ -221,7 +214,7 @@ echo '{"input": {"depth": 5, "field_count": 3, "operation_type": "query", "field
 opa test opa-policies/ -v
 ```
 
-The OPA input schema matches the Go parser's `QueryInfo` structure:
+The OPA input schema matches the parser's `QueryInfo` structure:
 
 ```json
 {
@@ -231,20 +224,16 @@ The OPA input schema matches the Go parser's `QueryInfo` structure:
     "depth": 3,
     "field_count": 5,
     "field_paths": ["user", "user.name", "user.email"],
-    "batch_size": 1,
-    "argument_depth": 2,
-    "lists_requested": 1,
-    "fragment_spread_count": 0,
-    "directives": 0,
-    "require_persisted_queries": false,
-    "field_allowlist": []
+    "tenant_id": "acmecorp",
+    "params": {
+      "depth_limit": 10,
+      "max_field_count": 100
+    }
   }
 }
 ```
 
 ## Admin API
-
-The admin API runs on a separate port (`:8082` by default). Use it for live rule management without restarting the sidecar.
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -252,7 +241,6 @@ The admin API runs on a separate port (`:8082` by default). Use it for live rule
 | `GET /admin/rules` | GET | Returns current rules configuration |
 | `PUT /admin/rules/update` | POST/PUT | Update rules at runtime (accepts parameter JSON, pushed to OPA data store) |
 | `GET /admin/stats` | GET | Returns runtime statistics (cache size, tenant count) |
-
 | `GET /admin/tenants` | GET | List all configured tenant IDs |
 | `GET /admin/tenants/{id}` | GET | Get a specific tenant's rules config |
 | `POST /admin/tenants/{id}` | POST/PUT | Create or update a tenant's rules |
@@ -287,7 +275,7 @@ curl http://localhost:8082/admin/stats
 
 ## Metrics
 
-Prometheus metrics are exposed at `/metrics` on the main listen port. Metrics include:
+Prometheus metrics are exposed at `/metrics` on the main listen port:
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
@@ -321,18 +309,13 @@ Request Flow
 │  gql-firewall sidecar  (Go)                                 │
 │                                                             │
 │  1. Parse GraphQL body (JSON)                                │
-│  2. Parse GraphQL query (AST)                                │
-│     │                                    ┌───────────────┐  │
-│     ├── Optional: Rust hot-path parser──▶│ gql-parser    │  │
-│     │   (if sidecar available)           │ (Rust, :9090) │  │
-│     │                                    └───────────────┘  │
-│  3. Evaluate local rules (depth, fields, ops)                │
-│  4. Evaluate OPA sidecar (optional)                          │
+│  2. Parse GraphQL query (Go gqlparser/v2, in-process)        │
+│  3. Evaluate OPA policies (embedded or sidecar)              │
 │     │                                    ┌───────────────┐  │
 │     └───────────────────────────────────▶│ OPA           │  │
 │                                          │ (:8181)       │  │
 │                                          └───────────────┘  │
-│  5. Forward or block?                                        │
+│  4. Forward or block?                                        │
 └─────────┬──────────────────────────────────────────────────┘
           │                    ┌──── Blocked ────▶ 403 {error, reason}
           ▼                    │
@@ -353,14 +336,11 @@ gql-firewall/
 ├── cmd/server/main.go            # Entry point — wires everything together (+ test, 25 tests)
 ├── config/params.json             # Sample OPA parameters
 ├── internal/
-│   ├── parser/                    # GraphQL query analysis (37 tests, including 13 invalid-input tests)
+│   ├── parser/                    # GraphQL query analysis (45 tests, including Rust compat)
 │   ├── opa/                       # OPA evaluator: sidecar, embedded, data store, input builder (63 tests)
 │   ├── metrics/                   # Prometheus instrumentation (6 tests)
 │   ├── proxy/                     # HTTP reverse proxy (29 tests, including 14 red-team attack tests)
 │   └── integration/               # End-to-end pipeline tests (4 tests)
-├── rust-parser/                   # Rust hot-path parser (8 tests, with circular fragment protection)
-│   ├── Cargo.toml
-│   └── src/main.rs              # CLI + HTTP sidecar
 ├── opa-policies/                  # OPA Rego policy templates (33 tests)
 │   ├── graphql.rego              # 12 attack categories, parameterized via input.params
 │   └── graphql_test.rego         # 33 policy tests
@@ -372,8 +352,7 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           168 tests — server(25), parser(37), proxy(29), integration(4), opa(63), metrics(6)
-Rust:          8 tests  — parsing, depth, fields, paths, mutations, errors, circular fragments
+Go:           176 tests — server(25), parser(45), proxy(29), integration(4), opa(63), metrics(6)
 OPA/Rego:     33 tests  — 12 attack categories, edge cases, combined rules
 Total:       209 tests  — all passing
 ```
@@ -381,7 +360,6 @@ Total:       209 tests  — all passing
 ```bash
 # Run everything
 go test ./... -count=1
-cd rust-parser && cargo test && cd ..
 opa test opa-policies/
 ```
 
@@ -389,7 +367,7 @@ opa test opa-policies/
 
 ## Suggested New Features
 
-The following features align with the product's business model — a standalone GraphQL firewall for mid-market API teams, Go control plane + Rust hot path, with OPA-based policy and an eventual acquisition path to Datadog, Kong, or Cloudflare.
+The following features align with the product's business model — a standalone GraphQL firewall for mid-market API teams, Go-only binary with OPA-based policy, and an eventual acquisition path to Datadog, Kong, or Cloudflare.
 
 ### Near-term (Phase 1 — build on existing architecture)
 
@@ -401,9 +379,9 @@ The following features align with the product's business model — a standalone 
 
 ### Mid-term (Phase 2 — premium tier enablers)
 
-**4. Per-tenant isolation with Rust hot-path routing** — Route requests to tenant-specific OPA data bundles based on API key or JWT claims. Each tenant gets their own policy scope without deploying separate sidecars. This is the product moat that differentiates from generic API gateways.
+**4. Per-tenant isolation with OPA data bundles** — Route requests to tenant-specific OPA data bundles based on API key or JWT claims. Each tenant gets their own policy scope without deploying separate sidecars. This is the product moat that differentiates from generic API gateways.
 
-**5. Rego policy caching in the Go sidecar** — Cache OPA decisions locally with a TTL to avoid the network hop on repeat queries. For a typical mid-market GraphQL API, ~70% of query patterns repeat within a 60-second window. This brings P99 latency from ~2ms (OPA RPC) to ~200µs (local cache hit). The Rust hot-path parser makes this even faster.
+**5. Rego policy caching in the Go sidecar** — Cache OPA decisions locally with a TTL to avoid the network hop on repeat queries. For a typical mid-market GraphQL API, ~70% of query patterns repeat within a 60-second window. This brings P99 latency from ~2ms (OPA RPC) to ~200µs (local cache hit).
 
 **6. REST API for live rule management** — Add admin endpoints (`POST /admin/rules`, `GET /admin/stats`) so platform teams can update rules without file access or sidecar restarts. This is a table-stakes enterprise feature that enables the Silver/Gold tier pricing model ($15K-$40K/mo).
 
@@ -415,55 +393,6 @@ The following features align with the product's business model — a standalone 
 
 **9. Kong/Konnect plugin packaging** — Package the Go sidecar as a Kong plugin (Go PDK) to capture the 30% of the market running Kong. This doesn't change the architecture — it's a deployment packaging change — but it opens the Kong acquisition path.
 
-**10. AI firewall extension** — Integrate a BERT-sized prompt injection classifier (e.g. `laiyer/deberta-v3-base-prompt-injection`) via the Rust hot-path parser using `candle` or `ort`. Run inference at <5ms per query. This turns the product into a GraphQL+AI security platform — the Platinum tier at $100K/mo — and addresses the fastest-growing enterprise security concern.
-
-## Deployment
-
-### Docker
-
-```dockerfile
-FROM golang:1.23-alpine AS builder
-WORKDIR /app
-COPY . .
-RUN go build -o gql-firewall ./cmd/server/
-
-FROM alpine:3.20
-COPY --from=builder /app/gql-firewall /usr/local/bin/
-COPY config/rules.json /etc/gql-firewall/rules.json
-EXPOSE 8081
-ENTRYPOINT ["gql-firewall", "--upstream", "http://upstream:8080", "--config", "/etc/gql-firewall/rules.json", "--listen", ":8081"]
-```
-
-### Kubernetes Sidecar
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-spec:
-  template:
-    spec:
-      containers:
-        - name: graphql
-          image: my-graphql-server:latest
-          ports:
-            - containerPort: 8080
-        - name: gql-firewall
-          image: gql-firewall:latest
-          args:
-            - --upstream=http://localhost:8080
-            - --config=/etc/gql-firewall/rules.json
-            - --listen=:8081
-          ports:
-            - containerPort: 8081
-          volumeMounts:
-            - name: rules
-              mountPath: /etc/gql-firewall
-      volumes:
-        - name: rules
-          configMap:
-            name: gql-firewall-rules
-```
-
 ## Development
 
 ### Adding a New Attack Detection
@@ -471,6 +400,7 @@ spec:
 1. Add the deny rule to `opa-policies/graphql.rego` with a unique message
 2. Write test cases in `opa-policies/graphql_test.rego`
 3. Validate with `opa test opa-policies/`
+4. Add Go-level integration test in `internal/opa/owasp_test.go`
 
 ## Roadmap
 
@@ -478,7 +408,7 @@ spec:
 |---|---|---|---|
 | **Phase 1** | Months 0-6 | Prometheus, schema-aware validation, operation-name allowlist | $99-499/mo |
 | **Phase 2** | Months 6-12 | Per-tenant isolation, policy caching, live admin API | $1,999-9,999/mo |
-| **Phase 3** | Months 12-24 | Datadog integration, cost analysis engine, Kong packaging, AI firewall | $40-100K/mo |
+| **Phase 3** | Months 12-24 | Datadog integration, cost analysis engine, Kong packaging | $40-100K/mo |
 
 ## License
 

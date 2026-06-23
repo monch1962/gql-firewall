@@ -19,7 +19,6 @@
 gql-firewall
 /gql-firewall
 /cmd/server/server
-!rust-parser/target/release/gql-parser
 
 # IDE / Editor
 .idea/
@@ -44,9 +43,6 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
-
-# Rust
-rust-parser/target/
 
 # Environment
 .env
