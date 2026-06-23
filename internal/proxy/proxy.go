@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -21,6 +22,9 @@ import (
 
 // DefaultMaxBodyBytes is the maximum request body size (1MB).
 const DefaultMaxBodyBytes = 1 * 1024 * 1024
+
+// DefaultParseTimeout is the maximum time allowed for GraphQL query parsing.
+const DefaultParseTimeout = 5 * time.Second
 
 // sanitizeError returns a generic error message suitable for client responses.
 func sanitizeError(context string) string {
@@ -65,10 +69,12 @@ type graphQLBody struct {
 
 // Handler is an HTTP handler that proxies GraphQL requests through a firewall.
 type Handler struct {
-	upstream     *httputil.ReverseProxy
-	evaluator    Evaluator
-	MaxBodyBytes int64
-	MaxCacheSize int
+	upstream             *httputil.ReverseProxy
+	evaluator            Evaluator
+	MaxBodyBytes         int64
+	MaxCacheSize         int
+	ParseTimeout         time.Duration
+	disablePanicRecovery bool // for testing
 }
 
 // New creates a new proxy handler that forwards to upstreamURL after
@@ -81,10 +87,14 @@ func New(upstreamURL string, evaluator Evaluator) (*Handler, error) {
 	if u.Scheme == "" || u.Host == "" {
 		return nil, fmt.Errorf("invalid upstream URL %q: must include scheme and host", upstreamURL)
 	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("invalid upstream URL scheme %q: must be http or https", u.Scheme)
+	}
 	return &Handler{
 		upstream:     httputil.NewSingleHostReverseProxy(u),
 		evaluator:    evaluator,
 		MaxBodyBytes: DefaultMaxBodyBytes,
+		ParseTimeout: DefaultParseTimeout,
 	}, nil
 }
 
@@ -99,6 +109,11 @@ func MustNew(upstreamURL string, evaluator Evaluator) *Handler {
 
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Prevent panic from crashing the process (H1 fix)
+	if !h.disablePanicRecovery {
+		defer h.recoverPanic(w, r)
+	}
+
 	if r.Method == http.MethodPost && isGraphQLPath(r.URL.Path) {
 		if !hasJSONContentType(r.Header) {
 			http.Error(w, `{"error": "Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
@@ -110,17 +125,33 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.upstream.ServeHTTP(w, r)
 }
 
+// recoverPanic catches panics from downstream handlers and returns a 500
+// instead of crashing the process.
+func (h *Handler) recoverPanic(w http.ResponseWriter, r *http.Request) {
+	if rec := recover(); rec != nil {
+		log.Printf("[PANIC] recovered in %s %s: %v", r.Method, r.URL.Path, rec)
+		metrics.RecordRequest("error", "unknown", 0)
+		http.Error(w, `{"error": "internal server error"}`, http.StatusInternalServerError)
+	}
+}
+
 func isGraphQLPath(path string) bool {
 	lower := strings.ToLower(path)
-	if strings.HasSuffix(lower, "/graphql") {
-		return true
-	}
-	return false
+	return strings.HasSuffix(lower, "/graphql")
 }
 
 func hasJSONContentType(headers http.Header) bool {
 	ct := headers.Get("Content-Type")
-	return strings.HasPrefix(ct, "application/json")
+	if !strings.HasPrefix(ct, "application/json") {
+		return false
+	}
+	// Allow application/json, application/json; charset=utf-8, etc.
+	// Reject application/json-fake or application/jsonml
+	if len(ct) > len("application/json") {
+		next := ct[len("application/json")]
+		return next == ';' || next == ' '
+	}
+	return true
 }
 
 func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
@@ -154,7 +185,8 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	queryInfo, err := parser.Parse(gqlReq.Query)
+	// Parse GraphQL query with timeout to prevent CPU exhaustion (H3 fix)
+	queryInfo, err := parseQueryWithTimeout(gqlReq.Query, h.ParseTimeout)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("query")), http.StatusBadRequest)
 		metrics.RecordRequest("error", "unknown", time.Since(start))
@@ -177,6 +209,7 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 
 	if !result.Allowed {
 		w.Header().Set("Content-Type", "application/json")
+		setSecurityHeaders(w)
 		w.WriteHeader(http.StatusForbidden)
 		reason := sanitizeReason(result.Reason)
 		fmt.Fprintf(w, `{"error": "request blocked", "reason": %q}`, reason)
@@ -187,9 +220,38 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 
 	metrics.RecordRequest("allowed", queryInfo.OperationType, time.Since(start))
 
+	// Set security headers on forwarded responses too
+	setSecurityHeaders(w)
+
 	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	r.ContentLength = int64(len(bodyBytes))
 	h.upstream.ServeHTTP(w, r)
+}
+
+// parseQueryWithTimeout runs GraphQL parsing with a timeout to prevent
+// CPU exhaustion from crafted queries (H3 fix).
+func parseQueryWithTimeout(query string, timeout time.Duration) (*parser.QueryInfo, error) {
+	type result struct {
+		info *parser.QueryInfo
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		info, err := parser.Parse(query)
+		ch <- result{info, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.info, r.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("query parsing timed out")
+	}
+}
+
+// setSecurityHeaders adds hardening headers to responses (H2 fix).
+func setSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
 }
 
 // extractTenantID extracts a tenant identifier from an API key header.

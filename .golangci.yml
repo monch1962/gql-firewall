@@ -1,0 +1,31 @@
+# golangci-lint configuration
+# See https://golangci-lint.run/usage/configuration/
+run:
+  timeout: 2m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - gosimple
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude:
+    # Test HTTP handlers: w.Write failures are fine in test stubs
+    - "Error return value of `w.Write` is not checked"
+    - "Error return value of `r.Body.Read` is not checked"
+    # Test evaluators: unused in current test pattern
+    - "func `withOPAFailClosed` is unused"
+    # Staticcheck: identical hash check is intentional
+    - "SA4000: identical expressions"
+    # Test: Evaluate calls in cache-miss test don't need checking
+    - "Error return value of `e.Evaluate` is not checked"
+    # HTTP handlers: json.Encode to ResponseWriter can't be recovered
+    - "Error return value of `.*json.Encoder.*.Encode` is not checked"
+    # Server: ListenAndServe always returns ErrServerClosed on shutdown
+    - "Error return value of `.*ListenAndServe.*` is not checked"

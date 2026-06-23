@@ -64,6 +64,10 @@ gql-firewall's OPA Rego policies (33 tests) cover 12 attack categories:
 | **Improved cache key** | Built-in | OPA cache poisoning (H-3) |
 | **Metrics isolation** | `--metrics-listen` | Traffic pattern leakage (M-4) |
 | **Graceful shutdown** | Built-in | Dropped requests on deploy (M-3) |
+| **Panic recovery** | Built-in | Process crash on handler panic (H1) |
+| **Security headers** | Built-in | MIME sniffing / clickjacking (H2) |
+| **Query parse timeout** | Built-in | CPU exhaustion via crafted queries (H3) |
+| **Upstream URL validation** | Built-in | Scheme injection / SSRF (H4) |
 
 ### Core
 - **GraphQL query parsing** — Parses queries, mutations, and subscriptions using `gqlparser/v2`. Extracts operation type, name, depth, field count, and full field paths.
@@ -352,9 +356,9 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           195 tests — server(25), parser(45), proxy(29), integration(23), opa(63), metrics(6)
+Go:           203 tests — server(25), parser(45), proxy(37), integration(23), opa(63), metrics(6)
 OPA/Rego:     33 tests  — 12 attack categories, edge cases, combined rules
-Total:       228 tests  — all passing
+Total:       236 tests  — all passing
 ```
 
 ```bash

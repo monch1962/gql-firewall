@@ -46,6 +46,9 @@ func (c *SidecarClient) Evaluate(input *Input) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("calling OPA: %w", err)
 	}
+	if resp == nil {
+		return nil, fmt.Errorf("OPA returned nil response")
+	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
