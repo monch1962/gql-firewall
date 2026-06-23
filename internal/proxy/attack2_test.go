@@ -8,8 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/monch1962/gql-firewall/internal/rules"
-	"github.com/monch1962/gql-firewall/internal/tenant"
+	"github.com/monch1962/gql-firewall/internal/opa"
 )
 
 // R15: Tenant ID extraction edge cases
@@ -23,9 +22,9 @@ func TestAttack_TenantIDFringeCases(t *testing.T) {
 		{"", ""},
 	}
 	for _, tt := range tests {
-		got := tenant.ExtractTenantID(tt.key)
+		got := extractTenantID(tt.key)
 		if got != tt.want {
-			t.Errorf("ExtractTenantID(%q) = %q, want %q", tt.key, got, tt.want)
+			t.Errorf("extractTenantID(%q) = %q, want %q", tt.key, got, tt.want)
 		}
 	}
 }
@@ -59,7 +58,7 @@ func TestAttack_BlockedResponseIsValidJSON(t *testing.T) {
 		"evil\t\b\f\r",
 	}
 	for _, reason := range reasons {
-		h := MustNew(up.URL, &stubEvaluator{result: &rules.Result{Allowed: false, Reason: reason}})
+		h := MustNew(up.URL, &stubEvaluator{result: &opa.Result{Allowed: false, Reason: reason}})
 		req := httptest.NewRequest("POST", "/graphql", bytes.NewReader(mustJSON(graphQLBody{Query: "{ hello }"})))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()

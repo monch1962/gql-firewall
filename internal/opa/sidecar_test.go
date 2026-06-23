@@ -5,22 +5,32 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/monch1962/gql-firewall/internal/parser"
 )
 
-func TestConfigured(t *testing.T) {
-	c := New("")
+func TestSidecar_Configured(t *testing.T) {
+	c := NewSidecar("")
 	if c.Configured() {
 		t.Error("expected Configured()=false for empty endpoint")
 	}
-	c2 := New("http://localhost:8181")
+	c2 := NewSidecar("http://localhost:8181")
 	if !c2.Configured() {
 		t.Error("expected Configured()=true for non-empty endpoint")
 	}
 }
 
-func TestEvaluate_AllowsByDefaultWhenNotConfigured(t *testing.T) {
+func TestSidecar_NotConfigured(t *testing.T) {
+	c := NewSidecar("")
+	input := &Input{OperationType: "query", Depth: 3, FieldCount: 10}
+	result, err := c.Evaluate(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Allowed {
+		t.Errorf("expected allowed when OPA not configured, got blocked: %s", result.Reason)
+	}
+}
+
+func TestSidecar_AllowsQuery(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			t.Errorf("expected POST, got %s", r.Method)
@@ -30,13 +40,9 @@ func TestEvaluate_AllowsByDefaultWhenNotConfigured(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := New(srv.URL)
-	info := &parser.QueryInfo{
-		OperationType: "query",
-		Depth:         3,
-		FieldCount:    10,
-	}
-	result, err := client.Evaluate(info)
+	client := NewSidecar(srv.URL)
+	input := &Input{OperationType: "query", Depth: 3, FieldCount: 10}
+	result, err := client.Evaluate(input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -45,19 +51,16 @@ func TestEvaluate_AllowsByDefaultWhenNotConfigured(t *testing.T) {
 	}
 }
 
-func TestEvaluate_BlocksQuery(t *testing.T) {
+func TestSidecar_BlocksQuery(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"result": {"allowed": false, "reason": "query depth exceeded"}}`))
 	}))
 	defer srv.Close()
 
-	client := New(srv.URL)
-	info := &parser.QueryInfo{
-		OperationType: "query",
-		Depth:         100,
-	}
-	result, err := client.Evaluate(info)
+	client := NewSidecar(srv.URL)
+	input := &Input{OperationType: "query", Depth: 100}
+	result, err := client.Evaluate(input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -69,53 +72,36 @@ func TestEvaluate_BlocksQuery(t *testing.T) {
 	}
 }
 
-func TestEvaluate_OPAError(t *testing.T) {
+func TestSidecar_ErrorResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
 
-	client := New(srv.URL)
-	info := &parser.QueryInfo{OperationType: "query"}
-	_, err := client.Evaluate(info)
+	client := NewSidecar(srv.URL)
+	input := &Input{OperationType: "query"}
+	_, err := client.Evaluate(input)
 	if err == nil {
 		t.Fatal("expected error for 500 response, got nil")
 	}
 }
 
-func TestEvaluate_OPATimeout(t *testing.T) {
+func TestSidecar_Timeout(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// OPA timeout — never responds
 		select {}
 	}))
 	defer srv.Close()
 
-	client := New(srv.URL)
-	client.httpClient.Timeout = 1 // 1ms timeout to ensure fast test
-	info := &parser.QueryInfo{OperationType: "query"}
-	_, err := client.Evaluate(info)
+	client := NewSidecar(srv.URL)
+	client.httpClient.Timeout = 1 // 1ms timeout
+	input := &Input{OperationType: "query"}
+	_, err := client.Evaluate(input)
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
 }
 
-func TestNew_EmptyURL(t *testing.T) {
-	client := New("")
-	if client == nil {
-		t.Fatal("expected non-nil client for empty URL")
-	}
-	// Should return allow-by-default when OPA is not configured
-	info := &parser.QueryInfo{OperationType: "query"}
-	result, err := client.Evaluate(info)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !result.Allowed {
-		t.Errorf("expected allowed (OPA disabled), got blocked: %s", result.Reason)
-	}
-}
-
-func TestEvaluate_SendsQueryInfo(t *testing.T) {
+func TestSidecar_SendsInput(t *testing.T) {
 	var receivedBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		buf := make([]byte, r.ContentLength)
@@ -126,15 +112,16 @@ func TestEvaluate_SendsQueryInfo(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := New(srv.URL)
-	info := &parser.QueryInfo{
+	client := NewSidecar(srv.URL)
+	input := &Input{
 		OperationType: "mutation",
 		Depth:         5,
 		FieldCount:    20,
 		OperationName: "CreateUser",
 		FieldPaths:    []string{"user", "user.name", "user.email"},
+		TenantID:      "acme",
 	}
-	_, err := client.Evaluate(info)
+	_, err := client.Evaluate(input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -142,9 +129,7 @@ func TestEvaluate_SendsQueryInfo(t *testing.T) {
 	if receivedBody == "" {
 		t.Fatal("expected request body to be sent")
 	}
-	// Should contain query info fields
-	if !strings.Contains(receivedBody, "mutation") || !strings.Contains(receivedBody, "CreateUser") {
+	if !strings.Contains(receivedBody, "mutation") || !strings.Contains(receivedBody, "CreateUser") || !strings.Contains(receivedBody, "tenant_id") {
 		t.Errorf("request body missing query info fields: %s", receivedBody)
 	}
 }
-

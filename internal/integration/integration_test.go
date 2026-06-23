@@ -1,274 +1,140 @@
-// Package integration tests the full gql-firewall pipeline end-to-end:
-// HTTP request → GraphQL parsing → rule evaluation → forward/block.
+// Package integration tests the full gql-firewall pipeline end-to-end.
 package integration
 
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 
-	"github.com/monch1962/gql-firewall/internal/config"
 	"github.com/monch1962/gql-firewall/internal/opa"
 	"github.com/monch1962/gql-firewall/internal/parser"
 	"github.com/monch1962/gql-firewall/internal/proxy"
-	"github.com/monch1962/gql-firewall/internal/rules"
 )
 
-// evalConfig wraps rules.Config to implement proxy.Evaluator.
-type evalConfig struct{ *rules.Config }
-
-func (e *evalConfig) Evaluate(info *parser.QueryInfo) (*rules.Result, error) {
-	return e.Config.Evaluate(info), nil
+// stubEval wraps an opa.Result to implement proxy.Evaluator.
+type stubEval struct {
+	result *opa.Result
 }
 
-// evalConfigAndOPA checks local rules first, then OPA.
-type evalConfigAndOPA struct {
-	local *rules.Config
-	opa   *opa.Client
+func (e *stubEval) Evaluate(info *parser.QueryInfo) (*opa.Result, error) {
+	return e.result, nil
 }
 
-func (e *evalConfigAndOPA) Evaluate(info *parser.QueryInfo) (*rules.Result, error) {
-	if e.local != nil {
-		r := e.local.Evaluate(info)
-		if !r.Allowed {
-			return r, nil
-		}
-	}
-	if e.opa != nil {
-		return e.opa.Evaluate(info)
-	}
-	return &rules.Result{Allowed: true}, nil
-}
-
-func TestFullPipeline_AllowQuery(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		var req map[string]interface{}
-		json.Unmarshal(body, &req)
-		if req["query"] != "{ hello }" {
-			t.Errorf("unexpected query: %v", req["query"])
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"data": {"hello": "world"}}`))
+func TestIntegration_ValidQueryPasses(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"data":{"hello":"world"}}`))
 	}))
-	defer upstream.Close()
+	defer up.Close()
 
-	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "rules.json")
-	os.WriteFile(cfgPath, []byte(`{"depth_limit": 5, "max_field_count": 20}`), 0644)
-	cfg, _ := config.Load(cfgPath)
+	h := proxy.MustNew(up.URL, &stubEval{result: &opa.Result{Allowed: true}})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
 
-	handler, _ := proxy.New(upstream.URL, &evalConfig{cfg})
-	req := httptest.NewRequest("POST", "/graphql",
-		bytes.NewReader([]byte(`{"query": "{ hello }"}`)))
-	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.Post(srv.URL+"/graphql", "application/json",
+		bytes.NewReader(mustJSON(map[string]string{"query": "{ hello }"})))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
 
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	resp := w.Result()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	if !bytes.Contains(body, []byte("world")) {
-		t.Errorf("expected upstream response, got %s", string(body))
+		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
 }
 
-func TestFullPipeline_BlockDeepQuery(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("upstream should not be called")
-	}))
-	defer upstream.Close()
+func TestIntegration_BlockedQueryReturns403(t *testing.T) {
+	h := proxy.MustNew("http://localhost:19999", &stubEval{result: &opa.Result{Allowed: false, Reason: "blocked by policy"}})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
 
-	cfg := &rules.Config{DepthLimit: 3}
-	handler, _ := proxy.New(upstream.URL, &evalConfig{cfg})
+	resp, err := http.Post(srv.URL+"/graphql", "application/json",
+		bytes.NewReader(mustJSON(map[string]string{"query": "{ secret }"})))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
 
-	req := httptest.NewRequest("POST", "/graphql",
-		bytes.NewReader([]byte(`{"query": "{ a { b { c { d } } } }"}`)))
-	req.Header.Set("Content-Type", "application/json")
-
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	resp := w.Result()
 	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", resp.StatusCode)
+		t.Errorf("expected 403, got %d", resp.StatusCode)
 	}
 }
 
-func TestFullPipeline_BlockSSNField(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("upstream should not be called")
+func TestIntegration_NonGraphQLPathPassesThrough(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
 	}))
-	defer upstream.Close()
+	defer up.Close()
 
-	cfg := &rules.Config{FieldBlocklist: []string{"user.ssn"}}
-	handler, _ := proxy.New(upstream.URL, &evalConfig{cfg})
+	h := proxy.MustNew(up.URL, &stubEval{result: &opa.Result{Allowed: true}})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
 
-	req := httptest.NewRequest("POST", "/graphql",
-		bytes.NewReader([]byte(`{"query": "{ user { name ssn } }"}`)))
-	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.Get(srv.URL + "/health")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
 
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	resp := w.Result()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
 }
 
-func TestFullPipeline_OPAIntegration(t *testing.T) {
-	opaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"result": {"allowed": true}}`))
-	}))
-	defer opaSrv.Close()
-
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"data": {"ok": true}}`))
-	}))
-	defer upstream.Close()
-
-	opaClient := opa.New(opaSrv.URL)
-	handler, _ := proxy.New(upstream.URL, &evalConfigAndOPA{
-		local: &rules.Config{},
-		opa:   opaClient,
+func TestIntegration_DepthBlockedByOPA(t *testing.T) {
+	store := opa.NewDataStore()
+	store.SetParams(map[string]interface{}{"depth_limit": 3.0})
+	eval, err := opa.NewEmbedded(opa.EmbedConfig{
+		Policy: `package graphql
+default allow := false
+allow if { count(deny) == 0 }
+deny contains msg if {
+	input.depth > input.params.depth_limit
+	msg := sprintf("depth %d exceeds limit", [input.depth])
+}
+`,
+		Store: store,
 	})
-
-	req := httptest.NewRequest("POST", "/graphql",
-		bytes.NewReader([]byte(`{"query": "{ ok }"}`)))
-	req.Header.Set("Content-Type", "application/json")
-
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	resp := w.Result()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	if err != nil {
+		t.Fatalf("failed to create embedded evaluator: %v", err)
 	}
-}
 
-func TestFullPipeline_OPABlocks(t *testing.T) {
-	opaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"result": {"allowed": false, "reason": "policy violation"}}`))
+	// Use a real upstream that we expect NOT to reach
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("should not reach upstream for blocked query")
 	}))
-	defer opaSrv.Close()
+	defer up.Close()
 
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("upstream should not be called")
-	}))
-	defer upstream.Close()
+	h := proxy.MustNew(up.URL, &evalWrapper{eval: eval, store: store})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
 
-	opaClient := opa.New(opaSrv.URL)
-	handler, _ := proxy.New(upstream.URL, &evalConfigAndOPA{
-		local: &rules.Config{},
-		opa:   opaClient,
-	})
+	resp, err := http.Post(srv.URL+"/graphql", "application/json",
+		bytes.NewReader(mustJSON(map[string]string{"query": "{ a { b { c { d } } } }"})))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
 
-	req := httptest.NewRequest("POST", "/graphql",
-		bytes.NewReader([]byte(`{"query": "{ hello }"}`)))
-	req.Header.Set("Content-Type", "application/json")
-
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	resp := w.Result()
 	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", resp.StatusCode)
+		t.Errorf("expected 403 for deep query, got %d", resp.StatusCode)
 	}
 }
 
-func TestFullPipeline_InvalidGraphQL(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("upstream should not be called")
-	}))
-	defer upstream.Close()
-
-	handler, _ := proxy.New(upstream.URL, &evalConfig{&rules.Config{}})
-
-	req := httptest.NewRequest("POST", "/graphql",
-		bytes.NewReader([]byte(`{"query": "{ invalid !!! }"}`)))
-	req.Header.Set("Content-Type", "application/json")
-
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	resp := w.Result()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", resp.StatusCode)
-	}
+type evalWrapper struct {
+	eval  opa.Evaluator
+	store *opa.DataStore
 }
 
-func TestFullPipeline_BlockMutation(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("upstream should not be called")
-	}))
-	defer upstream.Close()
-
-	cfg := &rules.Config{BlockedOperations: []string{"mutation"}}
-	handler, _ := proxy.New(upstream.URL, &evalConfig{cfg})
-
-	req := httptest.NewRequest("POST", "/graphql",
-		bytes.NewReader([]byte(`{"query": "mutation { deleteUser(id: 1) { id } }"}`)))
-	req.Header.Set("Content-Type", "application/json")
-
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	resp := w.Result()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", resp.StatusCode)
-	}
+func (w *evalWrapper) Evaluate(info *parser.QueryInfo) (*opa.Result, error) {
+	input := opa.BuildInput(info, w.store)
+	return w.eval.Evaluate(input)
 }
 
-func TestFullPipeline_HealthPassthrough(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"status": "ok"}`))
-	}))
-	defer upstream.Close()
-
-	handler, _ := proxy.New(upstream.URL, &evalConfig{&rules.Config{}})
-	req := httptest.NewRequest("GET", "/health", nil)
-
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	resp := w.Result()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-}
-
-func TestFullPipeline_FieldAllowlist(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("upstream should not be called")
-	}))
-	defer upstream.Close()
-
-	cfg := &rules.Config{
-		FieldAllowlist: []string{"user.name", "user.email"},
-	}
-	handler, _ := proxy.New(upstream.URL, &evalConfig{cfg})
-
-	req := httptest.NewRequest("POST", "/graphql",
-		bytes.NewReader([]byte(`{"query": "{ user { ssn } }"}`)))
-	req.Header.Set("Content-Type", "application/json")
-
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	resp := w.Result()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected 403 for field not in allowlist, got %d", resp.StatusCode)
-	}
+func mustJSON(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
 }

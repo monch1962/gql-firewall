@@ -1,0 +1,13 @@
+{
+  "depth_limit": 10,
+  "max_field_count": 100,
+  "blocked_operations": ["subscription"],
+  "field_blocklist": ["__schema", "__type", "user.ssn", "user.password"],
+  "max_directives": 5,
+  "max_batch_size": 1,
+  "max_argument_depth": 5,
+  "max_lists_requested": 5,
+  "max_fragment_spreads": 15,
+  "cost_budget": 50,
+  "require_persisted_queries": false
+}

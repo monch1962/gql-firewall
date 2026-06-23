@@ -35,9 +35,10 @@ gql-firewall's OPA Rego policies (35 tests) cover 12 attack categories — the m
 |---|---|---|
 | `--listen` | `:8081` | Firewall proxy listen address |
 | `--upstream` | `http://localhost:8080` | Upstream GraphQL server |
-| `--config` | `config/rules.json` | Path to rules configuration JSON |
 | `--schema` | `""` | Path to GraphQL SDL schema (optional) |
-| `--opa` | `""` | OPA sidecar endpoint (optional) |
+| `--opa` | `""` | OPA sidecar endpoint (e.g. http://localhost:8181/v1/data/graphql) |
+| `--opa-embed` | `""` | Path to Rego policy file for embedded OPA evaluation |
+| `--opa-params` | `""` | Path to parameters JSON file for embedded OPA |
 | `--opa-cache-ttl` | `60s` | TTL for cached OPA decisions |
 | `--opa-fail-closed` | `false` | Block when OPA is unreachable |
 | `--opa-audit-only` | `false` | Log OPA would-be blocks without enforcing |
@@ -66,17 +67,11 @@ gql-firewall's OPA Rego policies (35 tests) cover 12 attack categories — the m
 
 ### Core
 - **GraphQL query parsing** — Parses queries, mutations, and subscriptions using `gqlparser` (Go) or `async-graphql-parser` (Rust). Extracts operation type, name, depth, field count, and full field paths.
-- **Configurable rules engine** — JSON-configured rules evaluated before forwarding:
-  - **Depth limiting** — Reject queries that nest beyond N levels
-  - **Field counting** — Reject queries requesting too many fields
-  - **Operation type control** — Allow or block query/mutation/subscription
-  - **Operation-name allowlist** — Only allow named operations (e.g. `query GetUser`)
-  - **Field allowlists** — Only permit specified field paths
-  - **Field blocklists** — Deny specific sensitive fields (takes precedence)
-- **OPA/Rego integration** — Optional OPA sidecar for external policy evaluation.
-  - **OPA decision caching** — Cache OPA results with configurable TTL (`--opa-cache-ttl`)
-  - **Fail-open safety** — On OPA errors, requests pass through (configurable)
-  - **Audit-only mode** — `--opa-audit-only` runs OPA in log-only mode: blocked decisions are recorded as Prometheus metrics and logged, but the request is always allowed through. Use this to collect data before enabling enforcement.
+- **OPA/Rego policy engine** — All firewall rules are expressed as Rego policies. Supports two deployment modes:
+  - **Sidecar mode** (`--opa`): Evaluate policies via an OPA sidecar HTTP endpoint. Best for scale-out deployments.
+  - **Embedded mode** (`--opa-embed`): Evaluate policies in-process using the OPA Go library. Zero external dependencies, ~10µs evaluation time.
+- **12 attack categories covered** — See table above. All OWASP GraphQL Top 10 + 2 additional vectors.
+- **Configurable via OPA data injection** — Parameters (depth_limit, max_field_count, field_blocklist, etc.) are injected as OPA data. Update at runtime via admin API.
 - **SDL schema-aware validation** — Accept a GraphQL schema file (`--schema`). Validates requested fields exist on Query type before forwarding.
 - **Live admin API** — View and update rules at runtime via REST API on `:8082`.
 - **Prometheus metrics** — `/metrics` endpoint with counters for requests, blocks, latency, rule evaluations, and OPA calls.
@@ -90,14 +85,15 @@ gql-firewall's OPA Rego policies (35 tests) cover 12 attack categories — the m
 
 ### Security
 - **12 attack vectors covered** (see table above)
-- **Red-team verified** — 30 attack simulation tests across Go proxy, Go parser, and Rust parser. 7 real vulnerabilities found and patched (Content-Type bypass, case-sensitive path bypass, OPA reason injection, tenant ID extraction bug, Rust circular fragment crash, upstream URL validation, Rust HTTP body size).
+- **Red-team verified** — 30 attack simulation tests across Go proxy and Rust parser. 7 real vulnerabilities found and patched (Content-Type bypass, case-sensitive path bypass, OPA reason injection, tenant ID extraction bug, Rust circular fragment crash, upstream URL validation, Rust HTTP body size).
 - **Deny-override model** — requests pass by default, blocked only by matching deny rules (safe for phased rollout)
 - **Sensitive field blocking** — SSN, passwords, credit cards, API keys, secrets
 - **Introspection blocking** — direct + nested paths
 - **Operation restrictions** — per-environment operation type control
-- **Query cost budgeting** — Depth × field count complexity budgets
+- **Query cost budgeting** — Depth × field_count complexity budgets
 - **Persisted query mode** — block dynamic queries in production
 - **Rate limiting** — Via OPA policies with external data integration
+- **Audit-only mode** — `--opa-audit-only` runs OPA in log-only mode for safe data collection before enforcement
 
 ### Observability
 - **Prometheus `/metrics`** — Exposes request counts (by outcome + operation type), blocked request counters (by rule reason), latency histograms (by outcome), rule evaluation counters, OPA call counters, config reload counters, and active tenant gauge.
@@ -119,20 +115,28 @@ gql-firewall's OPA Rego policies (35 tests) cover 12 attack categories — the m
 git clone ... && cd gql-firewall
 go build -o gql-firewall ./cmd/server/
 
-# Start with local rules only
+# Start with embedded OPA (zero external dependencies)
 ./gql-firewall \
   --upstream http://localhost:8080 \
-  --config ./config/rules.json \
+  --opa-embed ./opa-policies/graphql.rego \
+  --opa-params ./config/params.json \
   --listen :8081
 
-# With all optional features enabled
+# Start with OPA sidecar
 ./gql-firewall \
   --upstream http://localhost:8080 \
-  --config ./config/rules.json \
+  --opa http://localhost:8181/v1/data/graphql \
+  --listen :8081 \
+  --admin :8082
+
+# Start with all optional features
+./gql-firewall \
+  --upstream http://localhost:8080 \
+  --opa-embed ./opa-policies/graphql.rego \
+  --opa-params ./config/params.json \
   --schema ./schema.graphql \
   --listen :8081 \
   --admin :8082 \
-  --opa http://localhost:8181/v1/data/graphql/deny \
   --opa-cache-ttl 60s
 
 # With Rust hot-path parser sidecar
@@ -171,27 +175,34 @@ curl -X POST http://localhost:8081/graphql \
 
 ## Configuration
 
-### Rules JSON
+### Parameters JSON
 
-Create a JSON file with the rules you want to enforce:
+All firewall parameters are injected as OPA data. Create a JSON file that mirrors the Rego policy parameters:
 
 ```json
 {
   "depth_limit": 10,
   "max_field_count": 100,
   "blocked_operations": ["subscription"],
-  "field_blocklist": ["__schema", "__type", "user.ssn", "user.password", "user.creditCard"]
+  "field_blocklist": ["__schema", "__type", "user.ssn", "user.password"]
 }
 ```
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `depth_limit` | int | 0 | Max query nesting depth. 0 = disabled |
-| `max_field_count` | int | 0 | Max fields per query. 0 = disabled |
-| `blocked_operations` | []string | [] | Operation types to block (e.g. "mutation") |
-| `allowed_operations` | []string | [] | Only allow these operation types |
-| `field_allowlist` | []string | [] | Only allow these field paths |
-| `field_blocklist` | []string | [] | Block these field paths (overrides allowlist) |
+| `depth_limit` | number | 10 | Max query nesting depth |
+| `max_field_count` | number | 100 | Max fields per query |
+| `blocked_operations` | array | `["subscription"]` | Operation types to block |
+| `allowed_operations` | array | `[]` | Only allow these operation types |
+| `field_allowlist` | array | `[]` | Only allow these field paths |
+| `field_blocklist` | array | `[]` | Block these field paths (overrides allowlist) |
+| `max_directives` | number | 5 | Max directives per query |
+| `max_batch_size` | number | 1 | Max operations per batch |
+| `max_argument_depth` | number | 5 | Max argument nesting depth |
+| `max_lists_requested` | number | 5 | Max list fields per query |
+| `max_fragment_spreads` | number | 15 | Max fragment spreads per query |
+| `cost_budget` | number | 50 | Complexity budget (depth × field_count) |
+| `require_persisted_queries` | bool | false | Block dynamic (non-persisted) queries |
 
 ### OPA Policies
 
@@ -239,7 +250,7 @@ The admin API runs on a separate port (`:8082` by default). Use it for live rule
 |---|---|---|
 | `GET /admin/health` | GET | Health check — returns `{"status": "ok"}` |
 | `GET /admin/rules` | GET | Returns current rules configuration |
-| `PUT /admin/rules/update` | POST/PUT | Update rules at runtime (accepts full `rules.Config` JSON) |
+| `PUT /admin/rules/update` | POST/PUT | Update rules at runtime (accepts parameter JSON, pushed to OPA data store) |
 | `GET /admin/stats` | GET | Returns runtime statistics (cache size, tenant count) |
 
 | `GET /admin/tenants` | GET | List all configured tenant IDs |
@@ -339,23 +350,20 @@ Request Flow
 
 ```
 gql-firewall/
-├── cmd/server/main.go            # Entry point — wires everything together (+ test, 33 tests)
-├── config/rules.json             # Sample firewall rules
+├── cmd/server/main.go            # Entry point — wires everything together (+ test, 25 tests)
+├── config/params.json             # Sample OPA parameters
 ├── internal/
-│   ├── parser/                   # GraphQL query analysis (37 tests, including 13 invalid-input tests)
-│   ├── rules/                    # Configurable rule evaluation (27 tests)
-│   ├── config/                   # JSON config loader (7 tests)
-│   ├── metrics/                  # Prometheus instrumentation (5 tests)
-│   ├── opa/                      # OPA sidecar client (7 tests)
-│   ├── proxy/                    # HTTP reverse proxy (29 tests, including 14 red-team attack tests)
-│   ├── tenant/                   # Per-tenant rules isolation (11 tests)
-│   └── integration/              # End-to-end pipeline tests (9 tests)
-├── rust-parser/                  # Rust hot-path parser (8 tests, with circular fragment protection)
+│   ├── parser/                    # GraphQL query analysis (37 tests, including 13 invalid-input tests)
+│   ├── opa/                       # OPA evaluator: sidecar, embedded, data store, input builder (24 tests)
+│   ├── metrics/                   # Prometheus instrumentation (6 tests)
+│   ├── proxy/                     # HTTP reverse proxy (29 tests, including 14 red-team attack tests)
+│   └── integration/               # End-to-end pipeline tests (4 tests)
+├── rust-parser/                   # Rust hot-path parser (8 tests, with circular fragment protection)
 │   ├── Cargo.toml
 │   └── src/main.rs              # CLI + HTTP sidecar
-├── opa-policies/                 # OWA Rego policy templates
-│   ├── graphql.rego              # 12 attack categories covered
-│   └── graphql_test.rego         # 35 policy tests
+├── opa-policies/                  # OPA Rego policy templates (33 tests)
+│   ├── graphql.rego              # 12 attack categories, parameterized via input.params
+│   └── graphql_test.rego         # 33 policy tests
 ├── README.md
 ├── go.mod / go.sum
 └── .gitignore
@@ -364,11 +372,10 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           168 tests — server(36), parser(37), proxy(29), rules(27), tenant(11),
-                    integration(9), config(7), opa(7), metrics(6)
+Go:           129 tests — server(25), parser(37), proxy(29), integration(4), opa(24), metrics(6)
 Rust:          8 tests  — parsing, depth, fields, paths, mutations, errors, circular fragments
-OPA/Rego:     35 tests  — 12 attack categories, edge cases, combined rules
-Total:       211 tests  — all passing
+OPA/Rego:     33 tests  — 12 attack categories, edge cases, combined rules
+Total:       170 tests  — all passing
 ```
 
 ```bash
@@ -459,15 +466,7 @@ spec:
 
 ## Development
 
-### Adding a New Rule
-
-1. Add the field to `internal/rules/rules.go` Config struct
-2. Add evaluation logic to `Config.Evaluate()` method
-3. Write tests in `internal/rules/rules_test.go`
-4. Add the Rego deny rule in `opa-policies/graphql.rego`
-5. Write Rego test in `opa-policies/graphql_test.rego`
-
-### Adding a New OPA Attack Detection
+### Adding a New Attack Detection
 
 1. Add the deny rule to `opa-policies/graphql.rego` with a unique message
 2. Write test cases in `opa-policies/graphql_test.rego`

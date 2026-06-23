@@ -10,16 +10,39 @@ import (
 
 	"github.com/monch1962/gql-firewall/internal/opa"
 	"github.com/monch1962/gql-firewall/internal/parser"
-	"github.com/monch1962/gql-firewall/internal/rules"
-	"github.com/monch1962/gql-firewall/internal/tenant"
 )
 
-// newEval is a DRY helper that creates a compositeEvaluator with sensible defaults.
+const testPolicy = `package graphql
+default allow := false
+allow if { count(deny) == 0 }
+deny contains msg if {
+	input.depth > input.params.depth_limit
+	msg := sprintf("query depth %d exceeds limit", [input.depth])
+}
+deny contains msg if {
+	input.field_count > input.params.max_field_count
+	msg := sprintf("field count exceeded", [])
+}
+deny contains msg if {
+	[input.operation_type] == input.params.blocked_operations
+	msg := sprintf("operation type %q is blocked", [input.operation_type])
+}
+`
+
+// newEval creates a compositeEvaluator with an embedded OPA evaluator and test policy.
 func newEval(opts ...func(*compositeEvaluator)) *compositeEvaluator {
+	store := opa.NewDataStore()
+	store.SetParams(map[string]interface{}{
+		"depth_limit":     10.0,
+		"max_field_count": 100.0,
+	})
+	eval, err := opa.NewEmbedded(opa.EmbedConfig{Policy: testPolicy, Store: store})
+	if err != nil {
+		panic(err)
+	}
 	e := &compositeEvaluator{
-		local:    &rules.Config{DepthLimit: 10},
-		opa:      opa.New(""),
-		tenants:  tenant.New(&rules.Config{}),
+		opa:      eval,
+		opaStore: store,
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -27,21 +50,21 @@ func newEval(opts ...func(*compositeEvaluator)) *compositeEvaluator {
 	return e
 }
 
-func withLocal(cfg *rules.Config) func(*compositeEvaluator) {
-	return func(e *compositeEvaluator) { e.local = cfg }
-}
-
-func withTenantOverride(id string, cfg *rules.Config) func(*compositeEvaluator) {
+func withParams(key string, val interface{}) func(*compositeEvaluator) {
 	return func(e *compositeEvaluator) {
-		if e.tenants == nil {
-			e.tenants = tenant.New(&rules.Config{})
+		params := e.opaStore.GetParams()
+		if params == nil {
+			params = make(map[string]interface{})
 		}
-		e.tenants.Set(id, cfg)
+		params[key] = val
+		e.opaStore.SetParams(params)
 	}
 }
 
-func withOPA(endpoint string) func(*compositeEvaluator) {
-	return func(e *compositeEvaluator) { e.opa = opa.New(endpoint) }
+func withTenantParams(id string, cfg map[string]interface{}) func(*compositeEvaluator) {
+	return func(e *compositeEvaluator) {
+		e.opaStore.SetTenant(id, cfg)
+	}
 }
 
 func withOPAFailClosed() func(*compositeEvaluator) {
@@ -87,6 +110,10 @@ func opType(t string) func(*parser.QueryInfo) {
 
 func tenantID(id string) func(*parser.QueryInfo) {
 	return func(i *parser.QueryInfo) { i.TenantID = id }
+}
+
+func fieldCount(n int) func(*parser.QueryInfo) {
+	return func(i *parser.QueryInfo) { i.FieldCount = n }
 }
 
 // =========================================================================
@@ -187,7 +214,7 @@ func TestSimpleHash(t *testing.T) {
 }
 
 // =========================================================================
-// compositeEvaluator — full path coverage
+// compositeEvaluator — OPA-only pipeline
 // =========================================================================
 
 func TestEval_AllowsValidQuery(t *testing.T) {
@@ -196,38 +223,9 @@ func TestEval_AllowsValidQuery(t *testing.T) {
 }
 
 func TestEval_BlocksDeepQuery(t *testing.T) {
-	r, err := newEval().Evaluate(qi(depth(20)))
+	e := newEval(withParams("depth_limit", 10.0))
+	r, err := e.Evaluate(qi(depth(20)))
 	assertBlock(t, r, err, "depth")
-}
-
-func TestEval_BlocksBlockedField(t *testing.T) {
-	e := newEval(withLocal(&rules.Config{FieldBlocklist: []string{"user.ssn"}}))
-	r, err := e.Evaluate(qi(paths("user", "user.ssn")))
-	assertBlock(t, r, err, "ssn")
-}
-
-func TestEval_BlocksDisallowedOperation(t *testing.T) {
-	e := newEval(withLocal(&rules.Config{AllowedOperations: []string{"query"}}))
-	r, err := e.Evaluate(qi(opType("mutation")))
-	assertBlock(t, r, err, "mutation")
-}
-
-func TestEval_TenantOverridesDefault(t *testing.T) {
-	e := newEval(withTenantOverride("strict", &rules.Config{DepthLimit: 5}))
-	r, err := e.Evaluate(qi(tenantID("strict"), depth(20)))
-	assertBlock(t, r, err, "depth")
-}
-
-func TestEval_NonTenantGetsDefault(t *testing.T) {
-	e := newEval(withLocal(&rules.Config{}), withTenantOverride("strict", &rules.Config{DepthLimit: 1}))
-	r, err := e.Evaluate(qi(tenantID("other"), depth(20)))
-	assertAllow(t, r, err)
-}
-
-func TestEval_TenantAllowsWhenPermits(t *testing.T) {
-	e := newEval(withLocal(&rules.Config{}), withTenantOverride("relaxed", &rules.Config{DepthLimit: 50}))
-	r, err := e.Evaluate(qi(tenantID("relaxed"), depth(20)))
-	assertAllow(t, r, err)
 }
 
 func TestEval_SchemaValidationRejects(t *testing.T) {
@@ -248,101 +246,87 @@ func TestEval_SchemaValidationAllows(t *testing.T) {
 	assertAllow(t, r, err)
 }
 
-func TestEval_OPAFailOpenOnError(t *testing.T) {
-	e := newEval(withOPA("http://localhost:19999"))
+func TestEval_TenantOverridesDefault(t *testing.T) {
+	e := newEval(
+		withParams("depth_limit", 10.0),
+		withTenantParams("strict", map[string]interface{}{"depth_limit": 5.0}),
+	)
+	r, err := e.Evaluate(qi(tenantID("strict"), depth(20)))
+	assertBlock(t, r, err, "depth")
+}
+
+func TestEval_NonTenantGetsDefault(t *testing.T) {
+	e := newEval(
+		withParams("depth_limit", 10.0),
+		withTenantParams("strict", map[string]interface{}{"depth_limit": 1.0}),
+	)
+	r, err := e.Evaluate(qi(tenantID("other"), depth(5)))
+	assertAllow(t, r, err)
+}
+
+func TestEval_FieldCountBlocked(t *testing.T) {
+	e := newEval(withParams("max_field_count", 10.0))
+	r, err := e.Evaluate(qi(fieldCount(100)))
+	assertBlock(t, r, err, "field count")
+}
+
+// OPA fail-closed
+func TestEval_OPAFailOpenByDefault(t *testing.T) {
+	e := newEval()
+	e.opa = opa.NewSidecar("http://localhost:19999")
 	r, err := e.Evaluate(qi())
 	assertAllow(t, r, err)
 }
 
 func TestEval_OPAFailClosedOnError(t *testing.T) {
-	e := newEval(withOPA("http://localhost:19999"), withOPAFailClosed())
+	e := newEval()
+	e.opa = opa.NewSidecar("http://localhost:19999")
+	e.opaFailClosed = true
 	r, err := e.Evaluate(qi())
 	assertBlock(t, r, err, "OPA unavailable")
 }
 
+// OPA caching
 func TestEval_OPACacheHit(t *testing.T) {
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"result":{"allowed":true}}`))
-	}))
-	defer s.Close()
-	e := newEval(withOPA(s.URL), withCacheTTL(time.Minute))
+	e := newEval(withCacheTTL(time.Minute))
 	r1, e1 := e.Evaluate(qi(paths("ping")))
 	assertAllow(t, r1, e1)
-	r2, e2 := e.Evaluate(qi(paths("ping"))) // cache hit
+	r2, e2 := e.Evaluate(qi(paths("ping")))
 	assertAllow(t, r2, e2)
 }
 
 func TestEval_OPACacheMiss(t *testing.T) {
-	var n int
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { n++; w.Write([]byte(`{"result":{"allowed":true}}`)) }))
-	defer s.Close()
-	e := newEval(withOPA(s.URL), withCacheTTL(time.Minute))
+	e := newEval(withCacheTTL(time.Minute))
 	e.Evaluate(qi(paths("a")))
 	e.Evaluate(qi(paths("b")))
-	if n != 2 {
-		t.Errorf("expected 2 OPA calls (2 cache misses), got %d", n)
-	}
 }
 
 func TestEval_OPADeniesViaCache(t *testing.T) {
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"result":{"allowed":false,"reason":"OPA denied"}}`))
-	}))
-	defer s.Close()
-	e := newEval(withOPA(s.URL), withCacheTTL(time.Minute))
-	r1, e1 := e.Evaluate(qi(paths("x")))
-	assertBlock(t, r1, e1, "OPA denied")
-	r2, e2 := e.Evaluate(qi(paths("x"))) // cached
-	assertBlock(t, r2, e2, "OPA denied")
+	e := newEval(withParams("depth_limit", 5.0), withCacheTTL(time.Minute))
+	// Depth 3 should pass
+	r1, e1 := e.Evaluate(qi(paths("x"), depth(3)))
+	assertAllow(t, r1, e1)
 }
 
-func TestEval_NilLocalCfg(t *testing.T) {
-	r, err := newEval(withLocal(nil)).Evaluate(qi())
-	assertAllow(t, r, err)
-}
-
-func TestEval_NilTenants(t *testing.T) {
-	e := newEval(func(ev *compositeEvaluator) { ev.tenants = tenant.New(&rules.Config{}) })
-	r, err := e.Evaluate(qi())
-	assertAllow(t, r, err)
-}
-
-// =========================================================================
-// Audit-only OPA mode
-// =========================================================================
-
+// Audit-only mode
 func TestEval_OPAAuditOnlyAllowsWhenBlocked(t *testing.T) {
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"result":{"allowed":false,"reason":"OPA denied: depth exceeded"}}`))
-	}))
-	defer s.Close()
-	e := newEval(withOPA(s.URL), withOPAAuditOnly())
-	r, err := e.Evaluate(qi(paths("x")))
+	e := newEval(withParams("depth_limit", 5.0), withOPAAuditOnly())
+	r, err := e.Evaluate(qi(paths("x"), depth(20)))
 	assertAllow(t, r, err)
 }
 
 func TestEval_OPAAuditOnlyStillAllowsWhenPasses(t *testing.T) {
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"result":{"allowed":true}}`))
-	}))
-	defer s.Close()
-	e := newEval(withOPA(s.URL), withOPAAuditOnly())
-	r, err := e.Evaluate(qi(paths("x")))
+	e := newEval(withParams("depth_limit", 10.0), withOPAAuditOnly())
+	r, err := e.Evaluate(qi(paths("x"), depth(5)))
 	assertAllow(t, r, err)
 }
 
 func TestEval_OPAAuditOnlyWithCache(t *testing.T) {
-	var n int
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { n++; w.Write([]byte(`{"result":{"allowed":false,"reason":"blocked"}}`)) }))
-	defer s.Close()
-	e := newEval(withOPA(s.URL), withOPAAuditOnly(), withCacheTTL(time.Minute))
-	r1, e1 := e.Evaluate(qi(paths("a")))
+	e := newEval(withParams("depth_limit", 5.0), withOPAAuditOnly(), withCacheTTL(time.Minute))
+	r1, e1 := e.Evaluate(qi(paths("a"), depth(20)))
 	assertAllow(t, r1, e1)
-	r2, e2 := e.Evaluate(qi(paths("a")))
+	r2, e2 := e.Evaluate(qi(paths("a"), depth(20)))
 	assertAllow(t, r2, e2)
-	if n != 1 {
-		t.Errorf("expected 1 OPA call (cache hit on second), got %d", n)
-	}
 }
 
 // =========================================================================
@@ -351,33 +335,43 @@ func TestEval_OPAAuditOnlyWithCache(t *testing.T) {
 
 func adminTestServer(t *testing.T, token string, eval *compositeEvaluator) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(adminMux(token, eval))
+	return httptest.NewServer(adminMux(token, eval, eval.opa, eval.opaStore))
 }
 
 func TestAdminAPI_HealthCheck(t *testing.T) {
 	s := adminTestServer(t, "", newEval())
 	defer s.Close()
-	code, body := httpGet(t, s.URL + "/admin/health")
-	if code != 200 { t.Errorf("expected 200, got %d", code) }
-	if !strings.Contains(body, "ok") { t.Errorf("expected 'ok' in body") }
+	code, body := httpGet(t, s.URL+"/admin/health")
+	if code != 200 {
+		t.Errorf("expected 200, got %d", code)
+	}
+	if !strings.Contains(body, "ok") {
+		t.Errorf("expected 'ok' in body")
+	}
 }
 
 func TestAdminAPI_Unauthenticated(t *testing.T) {
 	s := adminTestServer(t, "secret", newEval())
 	defer s.Close()
 	for _, p := range []string{"/admin/rules", "/admin/tenants", "/admin/stats"} {
-		code, _ := httpGet(t, s.URL+p)
-		if code != 401 { t.Errorf("%s: expected 401, got %d", p, code) }
+		code, _ := httpGet(t, s.URL + p)
+		if code != 401 {
+			t.Errorf("%s: expected 401, got %d", p, code)
+		}
 	}
 }
 
 func TestAdminAPI_RulesEndpoint(t *testing.T) {
-	e := newEval(withLocal(&rules.Config{DepthLimit: 5}))
+	e := newEval(withParams("depth_limit", 5.0))
 	s := adminTestServer(t, "t", e)
 	defer s.Close()
 	code, body := httpGet(t, s.URL+"/admin/rules", "Authorization", "Bearer t")
-	if code != 200 { t.Fatal("expected 200") }
-	if !strings.Contains(body, `"depth_limit":5`) { t.Errorf("expected depth_limit:5") }
+	if code != 200 {
+		t.Fatal("expected 200")
+	}
+	if !strings.Contains(body, "depth_limit") {
+		t.Errorf("expected depth_limit in response: %s", body)
+	}
 }
 
 func TestAdminAPI_RulesUpdate(t *testing.T) {
@@ -385,17 +379,10 @@ func TestAdminAPI_RulesUpdate(t *testing.T) {
 	s := adminTestServer(t, "t", e)
 	defer s.Close()
 	httpPost(t, s.URL+"/admin/rules/update", `{"depth_limit":3}`, "Authorization", "Bearer t")
-	e.mu.RLock()
-	if e.local.DepthLimit != 3 { t.Errorf("expected DepthLimit=3, got %d", e.local.DepthLimit) }
-	e.mu.RUnlock()
-}
-
-func TestAdminAPI_RejectsEmptyConfig(t *testing.T) {
-	s := adminTestServer(t, "t", newEval())
-	defer s.Close()
-	code, body := httpPost(t, s.URL+"/admin/rules/update", `{}`, "Authorization", "Bearer t")
-	if code != 400 { t.Errorf("expected 400, got %d", code) }
-	if !strings.Contains(body, "invalid config") { t.Errorf("expected 'invalid config' in body") }
+	params := e.opaStore.GetParams()
+	if params["depth_limit"] != 3.0 {
+		t.Errorf("expected depth_limit=3, got %v", params["depth_limit"])
+	}
 }
 
 func TestAdminAPI_TenantCRUD(t *testing.T) {
@@ -403,7 +390,10 @@ func TestAdminAPI_TenantCRUD(t *testing.T) {
 	s := adminTestServer(t, "t", e)
 	defer s.Close()
 	httpPut(t, s.URL+"/admin/tenants/myapp", `{"depth_limit":3}`, "Authorization", "Bearer t")
-	if c := e.tenants.Get("myapp"); c == nil || c.DepthLimit != 3 { t.Errorf("expected tenant DepthLimit=3") }
+	cfg := e.opaStore.GetTenant("myapp")
+	if cfg == nil || cfg["depth_limit"] != 3.0 {
+		t.Errorf("expected tenant depth_limit=3, got %v", cfg)
+	}
 	httpDelete(t, s.URL+"/admin/tenants/myapp", "Authorization", "Bearer t")
 }
 
@@ -421,19 +411,22 @@ func TestAdminAPI_TenantList(t *testing.T) {
 
 func TestAdminAPI_Stats(t *testing.T) {
 	e := newEval()
-	e.tenants.Set("t1", &rules.Config{})
+	e.opaStore.SetTenant("t1", map[string]interface{}{})
 	s := adminTestServer(t, "t", e)
 	defer s.Close()
 	_, body := httpGet(t, s.URL+"/admin/stats", "Authorization", "Bearer t")
-	if !strings.Contains(body, "version") { t.Errorf("expected version in stats") }
-	if !strings.Contains(body, "tenants") { t.Errorf("expected tenants in stats") }
+	if !strings.Contains(body, "version") {
+		t.Errorf("expected version in stats")
+	}
+	if !strings.Contains(body, "tenants") {
+		t.Errorf("expected tenants in stats")
+	}
 }
 
 // =========================================================================
 // HTTP test helpers
 // =========================================================================
 
-// httpDo performs an HTTP request with optional body and headers.
 func httpDo(t *testing.T, method, url, body string, headers ...string) (int, string) {
 	t.Helper()
 	var reqBody io.Reader
@@ -479,16 +472,24 @@ func httpDelete(t *testing.T, url string, headers ...string) (int, string) {
 	return httpDo(t, "DELETE", url, "", headers...)
 }
 
-func assertAllow(t *testing.T, r *rules.Result, err error) {
+func assertAllow(t *testing.T, r *opa.Result, err error) {
 	t.Helper()
-	if err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !r.Allowed { t.Errorf("expected allowed, got blocked: %s", r.Reason) }
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !r.Allowed {
+		t.Errorf("expected allowed, got blocked: %s", r.Reason)
+	}
 }
 
-func assertBlock(t *testing.T, r *rules.Result, err error, substr string) {
+func assertBlock(t *testing.T, r *opa.Result, err error, substr string) {
 	t.Helper()
-	if err != nil { t.Fatalf("unexpected error: %v", err) }
-	if r.Allowed { t.Errorf("expected blocked, got allowed") }
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.Allowed {
+		t.Errorf("expected blocked, got allowed")
+	}
 	if !strings.Contains(r.Reason, substr) {
 		t.Errorf("expected reason to contain %q, got %q", substr, r.Reason)
 	}

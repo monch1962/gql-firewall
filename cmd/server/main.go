@@ -15,51 +15,43 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/monch1962/gql-firewall/internal/config"
 	"github.com/monch1962/gql-firewall/internal/metrics"
 	"github.com/monch1962/gql-firewall/internal/opa"
 	"github.com/monch1962/gql-firewall/internal/parser"
 	"github.com/monch1962/gql-firewall/internal/proxy"
-	"github.com/monch1962/gql-firewall/internal/rules"
-	"github.com/monch1962/gql-firewall/internal/tenant"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 func main() {
 	var (
 		listenAddr      = flag.String("listen", ":8081", "Address to listen on")
 		upstreamURL     = flag.String("upstream", "http://localhost:8080", "Upstream GraphQL server URL")
-		configPath      = flag.String("config", "config/rules.json", "Path to rules configuration JSON file")
-		opaEndpoint     = flag.String("opa", "", "OPA sidecar endpoint (optional)")
+		opaEndpoint     = flag.String("opa", "", "OPA sidecar endpoint (e.g. http://localhost:8181/v1/data/graphql)")
+		opaEmbed        = flag.String("opa-embed", "", "Path to Rego policy file for embedded evaluation (default: built-in policy)")
+		opaParams       = flag.String("opa-params", "", "Path to parameters JSON file for embedded OPA")
 		schemaPath      = flag.String("schema", "", "Path to GraphQL SDL schema file (optional)")
 		adminListenAddr = flag.String("admin", ":8082", "Admin API listen address (set to empty to disable)")
 		adminToken      = flag.String("admin-token", "", "Required bearer token for admin API (C-1 fix)")
 		cacheTTL        = flag.Duration("opa-cache-ttl", 60*time.Second, "TTL for cached OPA decisions (0 = disabled)")
 		opaFailClosed   = flag.Bool("opa-fail-closed", false, "Block requests when OPA is unreachable (C-2 fix)")
+		opaAuditOnly    = flag.Bool("opa-audit-only", false, "Run OPA in audit-only mode (log would-be blocks, don't enforce)")
 		maxBodyMB       = flag.Int64("max-body-mb", 1, "Maximum request body size in MB (H-6 fix)")
 		tlsCert         = flag.String("tls-cert", "", "Path to TLS certificate file (H-5 fix)")
 		tlsKey          = flag.String("tls-key", "", "Path to TLS private key file (H-5 fix)")
-		metricsListen   = flag.String("metrics-listen", "", "Separate listen address for metrics (M-4 fix; empty = serve on main port)")
-		opaAuditOnly    = flag.Bool("opa-audit-only", false, "Run OPA in audit-only mode: log would-be blocks without enforcing")
+		metricsListen   = flag.String("metrics-listen", "", "Separate listen address for metrics (M-4 fix)")
 	)
 	flag.Parse()
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	log.Printf("gql-firewall v%s starting (listen=%s upstream=%s)", version, *listenAddr, *upstreamURL)
 
-	// Load local rules configuration
-	rulesCfg := &rules.Config{}
-	if *configPath != "" {
-		cfg, err := config.Load(*configPath)
-		if err != nil {
-			log.Fatalf("failed to load config: %v", err)
-		}
-		if err := rules.Validate(cfg); err != nil {
-			log.Fatalf("invalid config: %v", err)
-		}
-		rulesCfg = cfg
-		log.Printf("loaded config from %s", *configPath)
+	// Validate: at least one OPA mode must be configured
+	if *opaEndpoint == "" && *opaEmbed == "" {
+		log.Fatal("either --opa (sidecar) or --opa-embed (embedded Rego) must be configured")
+	}
+	if *opaEndpoint != "" && *opaEmbed != "" {
+		log.Fatal("--opa and --opa-embed are mutually exclusive")
 	}
 
 	// Load SDL schema for schema-aware validation
@@ -73,34 +65,58 @@ func main() {
 		log.Printf("loaded schema from %s (%d types)", *schemaPath, schemaDoc.TypeCount)
 	}
 
-	// Set up OPA client (optional)
-	opaClient := opa.New(*opaEndpoint)
+	// Build the OPA evaluator
+	opaStore := opa.NewDataStore()
+
+	var opaEval opa.Evaluator
 	if *opaEndpoint != "" {
-		if *opaAuditOnly {
-			log.Printf("OPA sidecar configured at %s (AUDIT-ONLY — blocks are logged, not enforced; cache TTL: %s, fail-closed: %v)", *opaEndpoint, *cacheTTL, *opaFailClosed)
-		} else {
-			log.Printf("OPA sidecar configured at %s (cache TTL: %s, fail-closed: %v)", *opaEndpoint, *cacheTTL, *opaFailClosed)
-		}
+		opaEval = opa.NewSidecar(*opaEndpoint)
+		log.Printf("OPA sidecar configured at %s (cache TTL: %s, fail-closed: %v, audit-only: %v)",
+			*opaEndpoint, *cacheTTL, *opaFailClosed, *opaAuditOnly)
 	} else {
-		log.Printf("no OPA endpoint configured — using local rules only")
+		// Embedded mode — policy file is required
+		if *opaEmbed == "" {
+			log.Fatal("--opa-embed requires a path to a Rego policy file")
+		}
+		policyData, err := os.ReadFile(*opaEmbed)
+		if err != nil {
+			log.Fatalf("failed to read policy file %s: %v", *opaEmbed, err)
+		}
+
+		// Load params if provided
+		if *opaParams != "" {
+			paramsData, err := os.ReadFile(*opaParams)
+			if err != nil {
+				log.Fatalf("failed to read params file %s: %v", *opaParams, err)
+			}
+			if err := opaStore.LoadParamsFromJSON(paramsData); err != nil {
+				log.Fatalf("failed to parse params JSON: %v", err)
+			}
+			log.Printf("loaded OPA params from %s", *opaParams)
+		}
+
+		opaEval, err = opa.NewEmbedded(opa.EmbedConfig{
+			Policy: string(policyData),
+			Store:  opaStore,
+		})
+		if err != nil {
+			log.Fatalf("failed to initialize embedded OPA: %v", err)
+		}
+		log.Printf("embedded OPA evaluator ready (audit-only: %v)", *opaAuditOnly)
 	}
 
-	// Build the composite evaluator: local rules → tenant config → caching OPA → schema
-	tenantStore := tenant.New(rulesCfg)
-
 	evaluator := &compositeEvaluator{
-		local:         rulesCfg,
-		tenants:       tenantStore,
-		opa:           opaClient,
-		schema:        schemaDoc,
-		cacheTTL:      *cacheTTL,
+		opa:          opaEval,
+		opaStore:     opaStore,
+		schema:       schemaDoc,
+		cacheTTL:     *cacheTTL,
 		opaFailClosed: *opaFailClosed,
-		opaAuditOnly:  *opaAuditOnly,
+		opaAuditOnly: *opaAuditOnly,
 	}
 
 	// Set up the admin API for live rule management
 	if *adminListenAddr != "" {
-		startAdminAPI(*adminListenAddr, *adminToken, evaluator)
+		startAdminAPI(*adminListenAddr, *adminToken, evaluator, opaEval, opaStore)
 	}
 
 	// Create the proxy handler with body size limit (H-6 fix)
@@ -175,7 +191,6 @@ func main() {
 // requireAdminAuth is HTTP middleware for admin API authentication (C-1 fix).
 func requireAdminAuth(expectedToken string, next http.HandlerFunc) http.HandlerFunc {
 	if expectedToken == "" {
-		// No token configured — allow all (backward compat)
 		return next
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -184,14 +199,12 @@ func requireAdminAuth(expectedToken string, next http.HandlerFunc) http.HandlerF
 			http.Error(w, `{"error": "authorization required"}`, http.StatusUnauthorized)
 			return
 		}
-		// Support "Bearer <token>" format
 		var token string
 		if len(auth) > 7 && auth[:7] == "Bearer " {
 			token = auth[7:]
 		} else {
 			token = auth
 		}
-		// Constant-time comparison to prevent timing attacks
 		if subtle.ConstantTimeCompare([]byte(token), []byte(expectedToken)) != 1 {
 			http.Error(w, `{"error": "invalid authorization token"}`, http.StatusForbidden)
 			return
@@ -201,20 +214,16 @@ func requireAdminAuth(expectedToken string, next http.HandlerFunc) http.HandlerF
 }
 
 // adminMux creates the admin API HTTP mux with all handlers configured.
-// Exported for testing — shared between production startAdminAPI and test servers.
-func adminMux(token string, eval *compositeEvaluator) *http.ServeMux {
+func adminMux(token string, eval *compositeEvaluator, opaEval opa.Evaluator, store *opa.DataStore) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/admin/rules", requireAdminAuth(token, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		eval.mu.RLock()
-		cfg := eval.local
-		eval.mu.RUnlock()
-		if cfg == nil {
-			json.NewEncoder(w).Encode(map[string]string{"status": "no config loaded"})
-			return
+		params := store.GetParams()
+		if params == nil {
+			params = map[string]interface{}{}
 		}
-		json.NewEncoder(w).Encode(cfg)
+		json.NewEncoder(w).Encode(params)
 	}))
 
 	mux.HandleFunc("/admin/rules/update", requireAdminAuth(token, func(w http.ResponseWriter, r *http.Request) {
@@ -222,31 +231,24 @@ func adminMux(token string, eval *compositeEvaluator) *http.ServeMux {
 			http.Error(w, "use POST or PUT", http.StatusMethodNotAllowed)
 			return
 		}
-		var newCfg rules.Config
-		if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+		var params map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
 			http.Error(w, fmt.Sprintf(`{"error": "invalid JSON: %s"}`, err), http.StatusBadRequest)
 			return
 		}
-		if err := rules.Validate(&newCfg); err != nil {
-			http.Error(w, fmt.Sprintf(`{"error": "invalid config: %s"}`, err), http.StatusBadRequest)
-			return
+		store.SetParams(params)
+		if embedded, ok := opaEval.(*opa.EmbeddedEvaluator); ok {
+			embedded.SetParams(params)
 		}
-		eval.mu.Lock()
-		eval.local = &newCfg
-		eval.mu.Unlock()
 		metrics.ConfigReloads.Inc()
-		log.Printf("admin API: rules updated (depth=%d fields=%d blocklist=%d)", newCfg.DepthLimit, newCfg.MaxFieldCount, len(newCfg.FieldBlocklist))
+		log.Printf("admin API: rules updated via OPA data store")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}))
 
 	mux.HandleFunc("/admin/tenants", requireAdminAuth(token, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if eval.tenants == nil {
-			json.NewEncoder(w).Encode([]string{})
-			return
-		}
-		json.NewEncoder(w).Encode(eval.tenants.List())
+		json.NewEncoder(w).Encode(store.ListTenants())
 	}))
 
 	mux.HandleFunc("/admin/tenants/", requireAdminAuth(token, func(w http.ResponseWriter, r *http.Request) {
@@ -259,37 +261,25 @@ func adminMux(token string, eval *compositeEvaluator) *http.ServeMux {
 		switch r.Method {
 		case http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
-			if eval.tenants == nil {
-				json.NewEncoder(w).Encode(map[string]string{"error": "tenant store not available"})
-				return
-			}
-			cfg := eval.tenants.Get(tenantID)
+			cfg := store.GetTenant(tenantID)
 			json.NewEncoder(w).Encode(cfg)
 
 		case http.MethodPost, http.MethodPut:
-			var newCfg rules.Config
-			if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+			var cfg map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 				http.Error(w, fmt.Sprintf("invalid JSON: %s", err), http.StatusBadRequest)
 				return
 			}
-			if err := rules.Validate(&newCfg); err != nil {
-				http.Error(w, fmt.Sprintf(`{"error": "invalid config: %s"}`, err), http.StatusBadRequest)
-				return
-			}
-			if eval.tenants != nil {
-				eval.tenants.Set(tenantID, &newCfg)
-				metrics.ActiveTenants.Set(float64(eval.tenants.Count()))
-				log.Printf("admin API: tenant %q rules updated", tenantID)
-			}
+			store.SetTenant(tenantID, cfg)
+			metrics.ActiveTenants.Set(float64(store.CountTenants()))
+			log.Printf("admin API: tenant %q rules updated", tenantID)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
 		case http.MethodDelete:
-			if eval.tenants != nil {
-				eval.tenants.Delete(tenantID)
-				metrics.ActiveTenants.Set(float64(eval.tenants.Count()))
-				log.Printf("admin API: tenant %q deleted", tenantID)
-			}
+			store.DeleteTenant(tenantID)
+			metrics.ActiveTenants.Set(float64(store.CountTenants()))
+			log.Printf("admin API: tenant %q deleted", tenantID)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
@@ -303,9 +293,7 @@ func adminMux(token string, eval *compositeEvaluator) *http.ServeMux {
 		stats := map[string]interface{}{
 			"version": version,
 			"uptime":  time.Since(startTime).String(),
-		}
-		if eval.tenants != nil {
-			stats["tenants"] = eval.tenants.Count()
+			"tenants": store.CountTenants(),
 		}
 		json.NewEncoder(w).Encode(stats)
 	}))
@@ -319,10 +307,8 @@ func adminMux(token string, eval *compositeEvaluator) *http.ServeMux {
 }
 
 // startAdminAPI starts the admin HTTP server for live rule management.
-func startAdminAPI(addr, token string, eval *compositeEvaluator) {
-	mux := adminMux(token, eval)
-
-	// Admin server also gets timeouts (H-7 fix)
+func startAdminAPI(addr, token string, eval *compositeEvaluator, opaEval opa.Evaluator, store *opa.DataStore) {
+	mux := adminMux(token, eval, opaEval, store)
 	adminServer := &http.Server{
 		Addr:              addr,
 		Handler:           mux,
@@ -331,7 +317,6 @@ func startAdminAPI(addr, token string, eval *compositeEvaluator) {
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       30 * time.Second,
 	}
-
 	go func() {
 		log.Printf("admin API listening on %s", addr)
 		if err := adminServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -342,13 +327,11 @@ func startAdminAPI(addr, token string, eval *compositeEvaluator) {
 
 var startTime = time.Now()
 
-// compositeEvaluator runs local rules first, then tenant-specific rules,
-// OPA with caching, then schema validation. Thread-safe for live config reloads.
+// compositeEvaluator runs schema validation then OPA evaluation with caching.
 type compositeEvaluator struct {
 	mu            sync.RWMutex
-	local         *rules.Config
-	tenants       *tenant.Store
-	opa           *opa.Client
+	opa           opa.Evaluator
+	opaStore      *opa.DataStore
 	schema        *parser.SchemaInfo
 	cacheTTL      time.Duration
 	cache         map[string]cachedDecision
@@ -357,125 +340,84 @@ type compositeEvaluator struct {
 }
 
 type cachedDecision struct {
-	result *rules.Result
+	result *opa.Result
 	expiry time.Time
 }
 
-func (c *compositeEvaluator) Evaluate(info *parser.QueryInfo) (*rules.Result, error) {
+// Evaluate implements proxy.Evaluator for the OPA-only pipeline.
+func (c *compositeEvaluator) Evaluate(info *parser.QueryInfo) (*opa.Result, error) {
 	c.mu.RLock()
-	localCfg := c.local
-	tenants := c.tenants
 	schema := c.schema
-	opaClient := c.opa
+	opaEval := c.opa
 	cacheTTL := c.cacheTTL
 	opaFailClosed := c.opaFailClosed
+	opaAuditOnly := c.opaAuditOnly
+	store := c.opaStore
 	c.mu.RUnlock()
 
-	// 0. Tenant-specific rules (overrides default config)
-	if tenants != nil {
-		tenantCfg := tenants.Get(info.TenantID)
-		if tenantCfg != nil {
-			result := tenantCfg.Evaluate(info)
-			if !result.Allowed {
-				metrics.RecordBlock(result.Reason)
-				return result, nil
-			}
-		}
-	}
-
-	// 1. Operation-name allowlist check (fast path)
-	if localCfg != nil && len(localCfg.AllowedOperations) > 0 {
-		found := false
-		for _, op := range localCfg.AllowedOperations {
-			if op == info.OperationType {
-				found = true
-				break
-			}
-		}
-		if !found {
-			result := &rules.Result{Allowed: false, Reason: fmt.Sprintf("operation type %q is not allowed", info.OperationType)}
-			metrics.RecordBlock(result.Reason)
-			return result, nil
-		}
-	}
-
-	// 2. Local rules evaluation
-	if localCfg != nil {
-		result := localCfg.Evaluate(info)
-		if !result.Allowed {
-			metrics.RecordBlock(result.Reason)
-			return result, nil
-		}
-	}
-
-	// 3. Schema-aware validation
+	// 1. Schema-aware validation
 	if schema != nil {
 		allowed, reason := schema.Validate(info)
 		if !allowed {
 			metrics.RecordBlock(reason)
-			return &rules.Result{Allowed: false, Reason: reason}, nil
+			return &opa.Result{Allowed: false, Reason: reason}, nil
 		}
 	}
 
-	// 4. OPA evaluation with caching (H-3 fix: better cache key includes field paths)
-	if opaClient.Configured() {
-		cacheKey := decisionCacheKey(info)
-		if cacheTTL > 0 {
-			c.mu.RLock()
-			if cached, ok := c.cache[cacheKey]; ok && time.Now().Before(cached.expiry) {
-				c.mu.RUnlock()
-				metrics.RecordOPA("cache_hit")
-				if c.opaAuditOnly && !cached.result.Allowed {
-					metrics.RecordOPAAuditBlock(cached.result.Reason)
-					log.Printf("[AUDIT] OPA would block: %s (allowed in audit-only mode)", cached.result.Reason)
-					return &rules.Result{Allowed: true}, nil
-				}
-				return cached.result, nil
-			}
+	// 2. Build OPA input with params and tenant config
+	input := opa.BuildInput(info, store)
+
+	// 3. OPA evaluation with caching
+	cacheKey := decisionCacheKey(info)
+	if cacheTTL > 0 {
+		c.mu.RLock()
+		if cached, ok := c.cache[cacheKey]; ok && time.Now().Before(cached.expiry) {
 			c.mu.RUnlock()
-		}
-
-		result, err := opaClient.Evaluate(info)
-		if err != nil {
-			metrics.RecordOPA("error")
-			if opaFailClosed {
-				// C-2 fix: fail closed when configured
-				return &rules.Result{Allowed: false, Reason: "OPA unavailable — request blocked for safety"}, nil
+			metrics.RecordOPA("cache_hit")
+			if opaAuditOnly && !cached.result.Allowed {
+				metrics.RecordOPAAuditBlock(cached.result.Reason)
+				log.Printf("[AUDIT] OPA would block: %s (allowed in audit-only mode)", cached.result.Reason)
+				return &opa.Result{Allowed: true}, nil
 			}
-			// On OPA error, allow by default (fail open) — backward compat
-			return &rules.Result{Allowed: true}, nil
+			return cached.result, nil
 		}
-
-		metrics.RecordOPA("evaluated")
-		if !result.Allowed {
-			if c.opaAuditOnly {
-				metrics.RecordOPAAuditBlock(result.Reason)
-				log.Printf("[AUDIT] OPA would block: %s (allowed in audit-only mode)", result.Reason)
-				result = &rules.Result{Allowed: true}
-			} else {
-				metrics.RecordBlock(result.Reason)
-			}
-		}
-
-		if cacheTTL > 0 {
-			c.mu.Lock()
-			if c.cache == nil {
-				c.cache = make(map[string]cachedDecision)
-			}
-			c.cache[cacheKey] = cachedDecision{result: result, expiry: time.Now().Add(cacheTTL)}
-			c.mu.Unlock()
-		}
-
-		return result, nil
+		c.mu.RUnlock()
 	}
 
-	return &rules.Result{Allowed: true}, nil
+	result, err := opaEval.Evaluate(input)
+	if err != nil {
+		metrics.RecordOPA("error")
+		if opaFailClosed {
+			return &opa.Result{Allowed: false, Reason: "OPA unavailable — request blocked for safety"}, nil
+		}
+		return &opa.Result{Allowed: true}, nil
+	}
+
+	metrics.RecordOPA("evaluated")
+	if !result.Allowed {
+		if opaAuditOnly {
+			metrics.RecordOPAAuditBlock(result.Reason)
+			log.Printf("[AUDIT] OPA would block: %s (allowed in audit-only mode)", result.Reason)
+			result = &opa.Result{Allowed: true}
+		} else {
+			metrics.RecordBlock(result.Reason)
+		}
+	}
+
+	if cacheTTL > 0 {
+		c.mu.Lock()
+		if c.cache == nil {
+			c.cache = make(map[string]cachedDecision)
+		}
+		c.cache[cacheKey] = cachedDecision{result: result, expiry: time.Now().Add(cacheTTL)}
+		c.mu.Unlock()
+	}
+
+	return result, nil
 }
 
 // decisionCacheKey builds a cache key from query info.
-// H-3 fix: includes a hash of field paths to prevent cache poisoning.
 func decisionCacheKey(info *parser.QueryInfo) string {
-	// Include operation type, depth, field count, and a hash of field paths
 	pathHash := simpleHash(info.FieldPaths)
 	return fmt.Sprintf("%s|%d|%d|%s", info.OperationType, info.Depth, info.FieldCount, pathHash)
 }
@@ -489,6 +431,5 @@ func simpleHash(parts []string) string {
 			h *= 1099511628211
 		}
 	}
-	// Return first 8 hex chars
 	return fmt.Sprintf("%08x", h)
 }

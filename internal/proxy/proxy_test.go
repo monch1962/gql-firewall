@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/monch1962/gql-firewall/internal/opa"
 	"github.com/monch1962/gql-firewall/internal/parser"
-	"github.com/monch1962/gql-firewall/internal/rules"
 )
 
 func TestSanitizeError(t *testing.T) {
@@ -53,11 +53,11 @@ func TestSanitizeReason(t *testing.T) {
 
 // stubEvaluator implements Evaluator for testing.
 type stubEvaluator struct {
-	result *rules.Result
+	result *opa.Result
 	err    error
 }
 
-func (s *stubEvaluator) Evaluate(info *parser.QueryInfo) (*rules.Result, error) {
+func (s *stubEvaluator) Evaluate(info *parser.QueryInfo) (*opa.Result, error) {
 	return s.result, s.err
 }
 
@@ -72,7 +72,7 @@ func TestHandler_AllowsValidQuery(t *testing.T) {
 	})
 	defer up.Close()
 
-	handler := MustNew(up.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(up.URL, &stubEvaluator{result: &opa.Result{Allowed: true}})
 	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(`{"query": "{ hello }"}`)))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -93,7 +93,7 @@ func TestHandler_BlocksQuery(t *testing.T) {
 	defer up.Close()
 
 	handler := MustNew(up.URL, &stubEvaluator{
-		result: &rules.Result{Allowed: false, Reason: "query depth exceeded"},
+		result: &opa.Result{Allowed: false, Reason: "query depth exceeded"},
 	})
 	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(`{"query": "{ deep { nested { query } } }"}`)))
 	req.Header.Set("Content-Type", "application/json")
@@ -123,7 +123,7 @@ func TestHandler_PassesHeaders(t *testing.T) {
 	})
 	defer up.Close()
 
-	handler := MustNew(up.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(up.URL, &stubEvaluator{result: &opa.Result{Allowed: true}})
 	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(`{"query": "{ ok }"}`)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer test-token")
@@ -141,7 +141,7 @@ func TestHandler_InvalidRequestBody(t *testing.T) {
 	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { t.Error("should not be called") })
 	defer up.Close()
 
-	handler := MustNew(up.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(up.URL, &stubEvaluator{result: &opa.Result{Allowed: true}})
 	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(`not-json`)))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -160,7 +160,7 @@ func TestHandler_NonPostRequests(t *testing.T) {
 	})
 	defer up.Close()
 
-	handler := MustNew(up.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(up.URL, &stubEvaluator{result: &opa.Result{Allowed: true}})
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -175,7 +175,7 @@ func TestHandler_MissingQueryField(t *testing.T) {
 	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { t.Error("should not be called") })
 	defer up.Close()
 
-	handler := MustNew(up.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(up.URL, &stubEvaluator{result: &opa.Result{Allowed: true}})
 	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(`{"operationName": "Test"}`)))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -194,7 +194,7 @@ func TestHandler_ForwardsUpstreamError(t *testing.T) {
 	})
 	defer up.Close()
 
-	handler := MustNew(up.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(up.URL, &stubEvaluator{result: &opa.Result{Allowed: true}})
 	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(`{"query": "{ hello }"}`)))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -214,7 +214,7 @@ func TestHandler_RejectsOversizedBody(t *testing.T) {
 	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { t.Error("should not be called") })
 	defer up.Close()
 
-	handler := MustNew(up.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(up.URL, &stubEvaluator{result: &opa.Result{Allowed: true}})
 	handler.MaxBodyBytes = 1024
 
 	largeBody := make([]byte, 2048)
@@ -240,7 +240,7 @@ func TestHandler_AcceptsBodyAtLimit(t *testing.T) {
 	})
 	defer up.Close()
 
-	handler := MustNew(up.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(up.URL, &stubEvaluator{result: &opa.Result{Allowed: true}})
 	handler.MaxBodyBytes = 1024
 
 	bodyContent := make([]byte, 900)
@@ -287,10 +287,10 @@ func TestHandler_TenantExtraction(t *testing.T) {
 	})
 	defer up.Close()
 
-	handler := MustNew(up.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(up.URL, &stubEvaluator{result: &opa.Result{Allowed: true}})
 	// Monkey-patch the handler to spy on tenant extraction
 	orig := handler.evaluator
-	handler.evaluator = &stubEvaluator{result: &rules.Result{Allowed: true}}
+	handler.evaluator = &stubEvaluator{result: &opa.Result{Allowed: true}}
 	_ = orig
 
 	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader([]byte(`{"query": "{ hello }"}`)))
@@ -312,7 +312,7 @@ func TestHandler_NonGraphQLPost(t *testing.T) {
 	})
 	defer up.Close()
 
-	handler := MustNew(up.URL, &stubEvaluator{result: &rules.Result{Allowed: true}})
+	handler := MustNew(up.URL, &stubEvaluator{result: &opa.Result{Allowed: true}})
 	req := httptest.NewRequest("POST", "/webhook", bytes.NewReader([]byte(`{"event": "test"}`)))
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)

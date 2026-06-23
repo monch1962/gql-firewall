@@ -1,5 +1,5 @@
 // Package proxy provides an HTTP reverse proxy that intercepts GraphQL
-// requests, parses them, evaluates firewall rules, and either forwards
+// requests, parses them, evaluates firewall rules via OPA, and either forwards
 // or blocks the request.
 package proxy
 
@@ -15,9 +15,8 @@ import (
 	"time"
 
 	"github.com/monch1962/gql-firewall/internal/metrics"
+	"github.com/monch1962/gql-firewall/internal/opa"
 	"github.com/monch1962/gql-firewall/internal/parser"
-	"github.com/monch1962/gql-firewall/internal/rules"
-	"github.com/monch1962/gql-firewall/internal/tenant"
 )
 
 // DefaultMaxBodyBytes is the maximum request body size (1MB).
@@ -42,11 +41,10 @@ func sanitizeError(context string) string {
 // sanitizeReason strips characters from a reason string that could break
 // JSON parsers or inject content into HTTP responses.
 func sanitizeReason(reason string) string {
-	// Only allow printable ASCII, space, and common punctuation
 	var b strings.Builder
 	b.Grow(len(reason))
 	for _, r := range reason {
-		if r >= 32 && r <= 126 { // printable ASCII range
+		if r >= 32 && r <= 126 {
 			b.WriteRune(r)
 		}
 	}
@@ -55,7 +53,7 @@ func sanitizeReason(reason string) string {
 
 // Evaluator is the interface for rule evaluation.
 type Evaluator interface {
-	Evaluate(info *parser.QueryInfo) (*rules.Result, error)
+	Evaluate(info *parser.QueryInfo) (*opa.Result, error)
 }
 
 // graphQLBody represents the expected JSON body of a GraphQL HTTP request.
@@ -70,7 +68,7 @@ type Handler struct {
 	upstream     *httputil.ReverseProxy
 	evaluator    Evaluator
 	MaxBodyBytes int64
-	MaxCacheSize int // max entries in evaluator cache (0 = unlimited)
+	MaxCacheSize int
 }
 
 // New creates a new proxy handler that forwards to upstreamURL after
@@ -101,9 +99,7 @@ func MustNew(upstreamURL string, evaluator Evaluator) *Handler {
 
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Only inspect POST requests to /graphql (case-insensitive)
 	if r.Method == http.MethodPost && isGraphQLPath(r.URL.Path) {
-		// Enforce Content-Type: application/json (R1/R2 fix)
 		if !hasJSONContentType(r.Header) {
 			http.Error(w, `{"error": "Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
 			return
@@ -111,29 +107,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleGraphQL(w, r)
 		return
 	}
-
-	// Pass through all other requests
 	h.upstream.ServeHTTP(w, r)
 }
 
-// isGraphQLPath returns true if the path ends with /graphql (case-insensitive).
-// Checks both the normalized path and the raw request URI to catch
-// path-traversal bypass (R4 fix).
 func isGraphQLPath(path string) bool {
 	lower := strings.ToLower(path)
-	// Normalized path check
 	if strings.HasSuffix(lower, "/graphql") {
 		return true
 	}
-	// Raw path check: if the path contains "/graphql/../" or similar,
-	// the raw request URI would still show the original intent.
-	// Since Go normalizes before we see it, a path like /graphql/../admin
-	// becomes /admin — we detect that the normalized result ISN'T /graphql
-	// and block traversal attempts.
 	return false
 }
 
-// hasJSONContentType returns true if the Content-Type header indicates JSON.
 func hasJSONContentType(headers http.Header) bool {
 	ct := headers.Get("Content-Type")
 	return strings.HasPrefix(ct, "application/json")
@@ -142,14 +126,11 @@ func hasJSONContentType(headers http.Header) bool {
 func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
-	// Enforce body size limit (H-6 fix)
 	r.Body = http.MaxBytesReader(w, r.Body, h.MaxBodyBytes)
 
-	// Read and preserve the body for upstream forwarding
 	bodyBytes, err := io.ReadAll(r.Body)
 	r.Body.Close()
 	if err != nil {
-		// Check if it was a size limit error
 		if err.Error() == "http: request body too large" {
 			http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("body")), http.StatusRequestEntityTooLarge)
 			metrics.RecordRequest("error", "unknown", time.Since(start))
@@ -160,7 +141,6 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse the GraphQL JSON body
 	var gqlReq graphQLBody
 	if err := json.Unmarshal(bodyBytes, &gqlReq); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("json")), http.StatusBadRequest)
@@ -174,7 +154,6 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse the GraphQL query
 	queryInfo, err := parser.Parse(gqlReq.Query)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("query")), http.StatusBadRequest)
@@ -184,12 +163,11 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 
 	// Extract tenant from X-API-Key header
 	if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
-		queryInfo.TenantID = tenant.ExtractTenantID(apiKey)
+		queryInfo.TenantID = extractTenantID(apiKey)
 	}
 
 	metrics.RecordRuleEval(fmt.Sprintf("op_%s", queryInfo.OperationType))
 
-	// Evaluate rules
 	result, err := h.evaluator.Evaluate(queryInfo)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("eval")), http.StatusInternalServerError)
@@ -200,7 +178,6 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	if !result.Allowed {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
-		// Sanitize the reason to prevent JSON injection from OPA (R6 fix)
 		reason := sanitizeReason(result.Reason)
 		fmt.Fprintf(w, `{"error": "request blocked", "reason": %q}`, reason)
 		metrics.RecordBlock(result.Reason)
@@ -208,12 +185,31 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Record allowed metric before forwarding
 	metrics.RecordRequest("allowed", queryInfo.OperationType, time.Since(start))
 
-	// Forward to upstream — restore the body
 	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	r.ContentLength = int64(len(bodyBytes))
-
 	h.upstream.ServeHTTP(w, r)
+}
+
+// extractTenantID extracts a tenant identifier from an API key header.
+func extractTenantID(apiKey string) string {
+	if apiKey == "" {
+		return ""
+	}
+	for i := len(apiKey) - 1; i >= 0; i-- {
+		if apiKey[i] == '_' && hasLeadingContent(apiKey[:i]) && i < len(apiKey)-1 {
+			return apiKey[:i]
+		}
+	}
+	return apiKey
+}
+
+func hasLeadingContent(s string) bool {
+	for i := range len(s) {
+		if s[i] != '_' && s[i] != ' ' {
+			return true
+		}
+	}
+	return false
 }
