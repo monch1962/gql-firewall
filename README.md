@@ -557,6 +557,11 @@ services:
 
 The following features align with the product's business model — a standalone GraphQL firewall for mid-market API teams, Go-only binary with OPA-based policy, and an eventual acquisition path to Datadog, Kong, or Cloudflare.
 
+### Learning Resources
+- **[Writing Custom OPA Policies](docs/opa-policy-tutorial.md)** — Hands-on tutorial with worked examples, testing guide, and reference for all input fields
+- **[OPA Policy Language](https://www.openpolicyagent.org/docs/latest/policy-language/)** — Official Rego reference
+
+
 ### Near-term (Phase 1 — build on existing architecture)
 
 **1. Prometheus metrics endpoint** — Expose deny counters, latency histograms, and active tenant counts as Prometheus `/metrics`. This is the single most requested feature by mid-market platform teams monitoring their APIs. It also directly feeds into Datadog's agent, making the product immediately useful to Datadog's install base (exit path alignment).
