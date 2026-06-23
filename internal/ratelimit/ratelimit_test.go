@@ -40,11 +40,9 @@ func TestAllow_DifferentKeysIndependent(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		l.Allow("tenant_a")
 	}
-	// tenant_b should still be allowed (independent bucket)
 	if !l.Allow("tenant_b") {
 		t.Error("expected tenant_b to have its own burst budget")
 	}
-	// tenant_a should be denied
 	if l.Allow("tenant_a") {
 		t.Error("expected tenant_a denied after exceeding burst")
 	}
@@ -53,11 +51,10 @@ func TestAllow_DifferentKeysIndependent(t *testing.T) {
 func TestAllow_RefillsOverTime(t *testing.T) {
 	l := New(Config{RequestsPerSecond: 100, Burst: 1})
 	defer l.Stop()
-	l.Allow("test") // use burst
+	l.Allow("test")
 	if l.Allow("test") {
 		t.Error("expected deny immediately after burst")
 	}
-	// Wait for refill
 	time.Sleep(15 * time.Millisecond)
 	if !l.Allow("test") {
 		t.Error("expected allow after refill")

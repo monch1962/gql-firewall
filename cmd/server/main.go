@@ -57,7 +57,7 @@ func main() {
 		logHandler = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
 	}
 	slog.SetDefault(slog.New(logHandler))
-	log.SetFlags(0) // std log goes through slog's handler
+	log.SetFlags(0)
 	log.SetOutput(slog.NewLogLogger(logHandler, slog.LevelInfo).Writer())
 
 	slog.Info("starting",
@@ -226,7 +226,7 @@ func main() {
 	}
 }
 
-// rateLimitMiddleware wraps an http.Handler with per-IP token-bucket rate limiting.
+// rateLimitMiddleware wraps an http.Handler with per-key token-bucket rate limiting.
 func rateLimitMiddleware(rl *ratelimit.Limiter, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.RemoteAddr

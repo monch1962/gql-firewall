@@ -5,7 +5,7 @@ OPA_BIN := $(HOME)/.local/bin/opa
 BINARY := gql-firewall
 LD_FLAGS := -ldflags="-s -w"
 
-.PHONY: all build test lint vet clean docker help
+.PHONY: all build test lint vet nilaway docker clean help
 
 all: lint vet build test
 
@@ -30,7 +30,7 @@ docker:
 
 clean:
 	rm -f $(BINARY)
-	go clean ./...
+	$(GO_BIN) clean ./...
 
 help:
 	@echo "Targets:"

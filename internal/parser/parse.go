@@ -1,5 +1,5 @@
 // Package parser provides GraphQL query analysis — parsing, depth calculation,
-// field path extraction, operation type detection, and attack vector metrics.
+// field path extraction, and operation type detection.
 package parser
 
 import (
@@ -40,9 +40,9 @@ func parseGraphQL(query string) (*QueryInfo, error) {
 	hash := sha256.Sum256([]byte(query))
 
 	info := &QueryInfo{
-		FieldPaths:   []string{},
-		BatchSize:    len(doc.Operations),
-		QueryHash:    fmt.Sprintf("%x", hash[:8]),
+		FieldPaths: []string{},
+		BatchSize:  len(doc.Operations),
+		QueryHash:  fmt.Sprintf("%x", hash[:8]),
 	}
 
 	// Iterate ALL operations for full analysis
@@ -62,6 +62,7 @@ func parseGraphQL(query string) (*QueryInfo, error) {
 			currentInfo.OperationType = "query"
 		}
 
+		// Track visited fragments to prevent infinite recursion on circular refs
 		currentInfo.FieldPaths = []string{}
 		visited := make(map[string]bool)
 		walkSelections(op.SelectionSet, "", 0, currentInfo, doc, visited)
@@ -149,6 +150,7 @@ func walkSelections(selections ast.SelectionSet, prefix string, depth int, info 
 		case *ast.FragmentSpread:
 			info.FragmentSpreadCount++
 			fragmentName := s.Name
+			// Prevent infinite recursion on circular fragment references
 			if visited[fragmentName] {
 				continue
 			}

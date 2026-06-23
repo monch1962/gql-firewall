@@ -1,5 +1,5 @@
 // Package ratelimit provides a simple token-bucket rate limiter
-// for per-tenant and per-IP rate limiting in the gql-firewall proxy.
+// for per-tenant and per-IP rate limiting.
 package ratelimit
 
 import (
@@ -9,18 +9,16 @@ import (
 
 // Config holds rate limiter configuration.
 type Config struct {
-	// RequestsPerSecond is the steady-state rate of allowed requests.
 	RequestsPerSecond float64
-	// Burst is the maximum number of requests allowed in a short burst.
-	Burst int
+	Burst             int
 }
 
-// Limiter implements per-key (tenant/IP) token-bucket rate limiting.
+// Limiter implements per-key token-bucket rate limiting.
 type Limiter struct {
-	mu       sync.Mutex
-	buckets  map[string]*bucket
-	config   Config
-	stopCh   chan struct{}
+	mu      sync.Mutex
+	buckets map[string]*bucket
+	config  Config
+	stopCh  chan struct{}
 }
 
 type bucket struct {
@@ -46,7 +44,6 @@ func New(cfg Config) *Limiter {
 }
 
 // Allow checks whether a request from the given key should be allowed.
-// Returns true if the request is within rate limits.
 func (l *Limiter) Allow(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -60,7 +57,6 @@ func (l *Limiter) Allow(key string) bool {
 		l.buckets[key] = b
 	}
 
-	// Refill tokens since last tick
 	now := time.Now()
 	elapsed := now.Sub(b.lastTick).Seconds()
 	b.tokens += elapsed * l.config.RequestsPerSecond
@@ -76,7 +72,6 @@ func (l *Limiter) Allow(key string) bool {
 	return true
 }
 
-// cleanup periodically removes stale buckets (no activity for 5 minutes).
 func (l *Limiter) cleanup() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
