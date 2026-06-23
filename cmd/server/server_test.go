@@ -48,6 +48,10 @@ func withOPAFailClosed() func(*compositeEvaluator) {
 	return func(e *compositeEvaluator) { e.opaFailClosed = true }
 }
 
+func withOPAAuditOnly() func(*compositeEvaluator) {
+	return func(e *compositeEvaluator) { e.opaAuditOnly = true }
+}
+
 func withCacheTTL(d time.Duration) func(*compositeEvaluator) {
 	return func(e *compositeEvaluator) { e.cacheTTL = d }
 }
@@ -304,6 +308,44 @@ func TestEval_NilTenants(t *testing.T) {
 }
 
 // =========================================================================
+// Audit-only OPA mode
+// =========================================================================
+
+func TestEval_OPAAuditOnlyAllowsWhenBlocked(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"result":{"allowed":false,"reason":"OPA denied: depth exceeded"}}`))
+	}))
+	defer s.Close()
+	e := newEval(withOPA(s.URL), withOPAAuditOnly())
+	r, err := e.Evaluate(qi(paths("x")))
+	assertAllow(t, r, err)
+}
+
+func TestEval_OPAAuditOnlyStillAllowsWhenPasses(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"result":{"allowed":true}}`))
+	}))
+	defer s.Close()
+	e := newEval(withOPA(s.URL), withOPAAuditOnly())
+	r, err := e.Evaluate(qi(paths("x")))
+	assertAllow(t, r, err)
+}
+
+func TestEval_OPAAuditOnlyWithCache(t *testing.T) {
+	var n int
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { n++; w.Write([]byte(`{"result":{"allowed":false,"reason":"blocked"}}`)) }))
+	defer s.Close()
+	e := newEval(withOPA(s.URL), withOPAAuditOnly(), withCacheTTL(time.Minute))
+	r1, e1 := e.Evaluate(qi(paths("a")))
+	assertAllow(t, r1, e1)
+	r2, e2 := e.Evaluate(qi(paths("a")))
+	assertAllow(t, r2, e2)
+	if n != 1 {
+		t.Errorf("expected 1 OPA call (cache hit on second), got %d", n)
+	}
+}
+
+// =========================================================================
 // Admin API tests — via httptest.Server
 // =========================================================================
 
@@ -391,58 +433,50 @@ func TestAdminAPI_Stats(t *testing.T) {
 // HTTP test helpers
 // =========================================================================
 
-func httpGet(t *testing.T, url string, headers ...string) (int, string) {
+// httpDo performs an HTTP request with optional body and headers.
+func httpDo(t *testing.T, method, url, body string, headers ...string) (int, string) {
 	t.Helper()
-	req, _ := http.NewRequest("GET", url, nil)
+	var reqBody io.Reader
+	if body != "" {
+		reqBody = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, url, reqBody)
+	if err != nil {
+		t.Fatalf("httpDo %s %s: %v", method, url, err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	for i := 0; i < len(headers); i += 2 {
 		req.Header.Set(headers[i], headers[i+1])
 	}
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil { t.Fatalf("httpGet %s: %v", url, err) }
+	if err != nil {
+		t.Fatalf("httpDo %s %s: %v", method, url, err)
+	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(b)
+}
+
+func httpGet(t *testing.T, url string, headers ...string) (int, string) {
+	t.Helper()
+	return httpDo(t, "GET", url, "", headers...)
 }
 
 func httpPost(t *testing.T, url, body string, headers ...string) (int, string) {
 	t.Helper()
-	req, _ := http.NewRequest("POST", url, strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	for i := 0; i < len(headers); i += 2 {
-		req.Header.Set(headers[i], headers[i+1])
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil { t.Fatalf("httpPost %s: %v", url, err) }
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, string(b)
+	return httpDo(t, "POST", url, body, headers...)
 }
 
 func httpPut(t *testing.T, url, body string, headers ...string) (int, string) {
 	t.Helper()
-	req, _ := http.NewRequest("PUT", url, strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	for i := 0; i < len(headers); i += 2 {
-		req.Header.Set(headers[i], headers[i+1])
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil { t.Fatalf("httpPut %s: %v", url, err) }
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, string(b)
+	return httpDo(t, "PUT", url, body, headers...)
 }
 
 func httpDelete(t *testing.T, url string, headers ...string) (int, string) {
 	t.Helper()
-	req, _ := http.NewRequest("DELETE", url, nil)
-	for i := 0; i < len(headers); i += 2 {
-		req.Header.Set(headers[i], headers[i+1])
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil { t.Fatalf("httpDelete %s: %v", url, err) }
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, string(b)
+	return httpDo(t, "DELETE", url, "", headers...)
 }
 
 func assertAllow(t *testing.T, r *rules.Result, err error) {

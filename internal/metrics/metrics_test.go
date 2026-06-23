@@ -29,6 +29,11 @@ func TestRecordOPA(t *testing.T) {
 	checkMetric(t, "gql_firewall_opa_requests_total")
 }
 
+func TestRecordOPAAuditBlock(t *testing.T) {
+	RecordOPAAuditBlock("OPA would block: depth exceeded")
+	checkMetric(t, "gql_firewall_opa_audit_blocks_total")
+}
+
 func TestMetricsEndpoint(t *testing.T) {
 	// Record some data first
 	RecordRequest("allowed", "query", 5*time.Millisecond)
@@ -54,6 +59,7 @@ func TestMetricsEndpoint(t *testing.T) {
 		"gql_firewall_request_duration_seconds",
 		"gql_firewall_active_tenants",
 		"gql_firewall_rule_evaluations_total",
+		"gql_firewall_opa_audit_blocks_total",
 	}
 	for _, name := range checks {
 			if !strings.Contains(body, name) {
