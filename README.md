@@ -340,7 +340,7 @@ gql-firewall/
 │   ├── opa/                       # OPA evaluator: sidecar, embedded, data store, input builder (63 tests)
 │   ├── metrics/                   # Prometheus instrumentation (6 tests)
 │   ├── proxy/                     # HTTP reverse proxy (29 tests, including 14 red-team attack tests)
-│   └── integration/               # End-to-end pipeline tests (4 tests)
+│   └── integration/               # End-to-end pipeline tests (23 tests, including 19 e2e HTTP tests)
 ├── opa-policies/                  # OPA Rego policy templates (33 tests)
 │   ├── graphql.rego              # 12 attack categories, parameterized via input.params
 │   └── graphql_test.rego         # 33 policy tests
@@ -352,9 +352,9 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           176 tests — server(25), parser(45), proxy(29), integration(4), opa(63), metrics(6)
+Go:           195 tests — server(25), parser(45), proxy(29), integration(23), opa(63), metrics(6)
 OPA/Rego:     33 tests  — 12 attack categories, edge cases, combined rules
-Total:       209 tests  — all passing
+Total:       228 tests  — all passing
 ```
 
 ```bash
