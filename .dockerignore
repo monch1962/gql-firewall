@@ -1,0 +1,31 @@
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Build
+*.exe
+*.test
+*.out
+/tmp/
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Docs
+README.md
+
+# CI
+.github/

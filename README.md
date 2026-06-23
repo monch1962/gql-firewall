@@ -368,6 +368,185 @@ opa test opa-policies/
 ```
 
 ---
+## Deployment
+
+### Docker
+
+Build the image:
+
+```bash
+docker build -t gql-firewall:latest .
+```
+
+Run with embedded OPA (single container, zero external dependencies):
+
+```bash
+docker run -p 8081:8081 \
+  -v $(pwd)/config/params.json:/app/config/params.json \
+  gql-firewall:latest \
+  --upstream http://host.docker.internal:8080 \
+  --opa-embed /app/opa-policies/graphql.rego \
+  --opa-params /app/config/params.json \
+  --listen :8081
+```
+
+Run with OPA sidecar (separate OPA container required):
+
+```bash
+# Start OPA
+docker run -d --name opa -p 8181:8181 \
+  -v $(pwd)/opa-policies:/policies \
+  openpolicyagent/opa:1.1.0 run --server /policies
+
+# Start firewall
+docker run -p 8081:8081 \
+  gql-firewall:latest \
+  --upstream http://host.docker.internal:8080 \
+  --opa http://opa:8181/v1/data/graphql \
+  --listen :8081
+```
+
+### Kubernetes Sidecar
+
+Deploy the firewall as a sidecar container alongside your GraphQL server in the same pod:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: graphql-server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: graphql
+  template:
+    metadata:
+      labels:
+        app: graphql
+    spec:
+      containers:
+        - name: graphql
+          image: my-graphql-server:latest
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+        - name: gql-firewall
+          image: gql-firewall:latest
+          args:
+            - --upstream=http://localhost:8080
+            - --opa-embed=/app/opa-policies/graphql.rego
+            - --opa-params=/app/config/params.json
+            - --listen=:8081
+            - --admin=:8082
+          ports:
+            - containerPort: 8081
+              name: http
+            - containerPort: 8082
+              name: admin
+          volumeMounts:
+            - name: opa-policy
+              mountPath: /app/opa-policies
+            - name: config
+              mountPath: /app/config
+          readinessProbe:
+            httpGet:
+              path: /admin/health
+              port: 8082
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+      volumes:
+        - name: opa-policy
+          configMap:
+            name: gql-firewall-policy
+        - name: config
+          configMap:
+            name: gql-firewall-config
+```
+
+The service routes incoming GraphQL traffic to the firewall sidecar port, which inspects and forwards to the local upstream:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: graphql
+spec:
+  selector:
+    app: graphql
+  ports:
+    - port: 80
+      targetPort: 8081
+      name: http
+```
+
+ConfigMaps for policy and parameters:
+
+```bash
+# Create ConfigMaps from your policy and config files
+kubectl create configmap gql-firewall-policy \
+  --from-file=opa-policies/graphql.rego
+
+kubectl create configmap gql-firewall-config \
+  --from-file=config/params.json
+```
+
+With OPA sidecar (separate container in the same pod):
+
+```yaml
+        - name: opa
+          image: openpolicyagent/opa:1.1.0
+          args:
+            - run
+            - --server
+            - /policies/graphql.rego
+          ports:
+            - containerPort: 8181
+          volumeMounts:
+            - name: opa-policy
+              mountPath: /policies
+        - name: gql-firewall
+          image: gql-firewall:latest
+          args:
+            - --upstream=http://localhost:8080
+            - --opa=http://localhost:8181/v1/data/graphql
+            - --listen=:8081
+```
+
+### Docker Compose
+
+```yaml
+version: "3.8"
+services:
+  graphql:
+    image: my-graphql-server:latest
+    expose:
+      - "8080"
+  gql-firewall:
+    build: .
+    ports:
+      - "8081:8081"
+    command:
+      - --upstream=http://graphql:8080
+      - --opa-embed=/app/opa-policies/graphql.rego
+      - --opa-params=/app/config/params.json
+      - --listen=:8081
+    volumes:
+      - ./opa-policies:/app/opa-policies
+      - ./config:/app/config
+```
+
+---
 
 ## Suggested New Features
 
