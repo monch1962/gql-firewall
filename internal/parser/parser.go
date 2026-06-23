@@ -13,12 +13,18 @@ import (
 
 // QueryInfo holds the results of parsing and analysing a GraphQL query.
 type QueryInfo struct {
-	OperationType string   `json:"operation_type"`
-	OperationName string   `json:"operation_name,omitempty"`
-	Depth         int      `json:"depth"`
-	FieldCount    int      `json:"field_count"`
-	FieldPaths    []string `json:"field_paths"`
-	TenantID      string   `json:"tenant_id,omitempty"`
+	OperationType       string   `json:"operation_type"`
+	OperationName       string   `json:"operation_name,omitempty"`
+	Depth               int      `json:"depth"`
+	FieldCount          int      `json:"field_count"`
+	FieldPaths          []string `json:"field_paths"`
+	TenantID            string   `json:"tenant_id,omitempty"`
+	Directives          int      `json:"directives,omitempty"`
+	BatchSize           int      `json:"batch_size,omitempty"`
+	ArgumentDepth       int      `json:"argument_depth,omitempty"`
+	ListsRequested      int      `json:"lists_requested,omitempty"`
+	FragmentSpreadCount int      `json:"fragment_spread_count,omitempty"`
+	QueryHash           string   `json:"query_hash,omitempty"`
 }
 
 // SchemaInfo holds a compiled GraphQL schema for schema-aware validation.
