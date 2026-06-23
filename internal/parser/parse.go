@@ -1,8 +1,9 @@
 // Package parser provides GraphQL query analysis — parsing, depth calculation,
-// field path extraction, and operation type detection.
+// field path extraction, operation type detection, and attack vector metrics.
 package parser
 
 import (
+	"crypto/sha256"
 	"fmt"
 
 	"github.com/vektah/gqlparser/v2/ast"
@@ -35,8 +36,13 @@ func parseGraphQL(query string) (*QueryInfo, error) {
 		}
 	}
 
+	// Compute query hash
+	hash := sha256.Sum256([]byte(query))
+
 	info := &QueryInfo{
-		FieldPaths: []string{},
+		FieldPaths:   []string{},
+		BatchSize:    len(doc.Operations),
+		QueryHash:    fmt.Sprintf("%x", hash[:8]),
 	}
 
 	// Iterate ALL operations for full analysis
@@ -56,7 +62,6 @@ func parseGraphQL(query string) (*QueryInfo, error) {
 			currentInfo.OperationType = "query"
 		}
 
-		// Track visited fragments to prevent infinite recursion on circular refs
 		currentInfo.FieldPaths = []string{}
 		visited := make(map[string]bool)
 		walkSelections(op.SelectionSet, "", 0, currentInfo, doc, visited)
@@ -76,6 +81,18 @@ func parseGraphQL(query string) (*QueryInfo, error) {
 		if currentInfo.FieldCount > info.FieldCount {
 			info.FieldCount = currentInfo.FieldCount
 		}
+		if currentInfo.Directives > info.Directives {
+			info.Directives = currentInfo.Directives
+		}
+		if currentInfo.ArgumentDepth > info.ArgumentDepth {
+			info.ArgumentDepth = currentInfo.ArgumentDepth
+		}
+		if currentInfo.ListsRequested > info.ListsRequested {
+			info.ListsRequested = currentInfo.ListsRequested
+		}
+		if currentInfo.FragmentSpreadCount > info.FragmentSpreadCount {
+			info.FragmentSpreadCount = currentInfo.FragmentSpreadCount
+		}
 		info.FieldPaths = append(info.FieldPaths, currentInfo.FieldPaths...)
 	}
 
@@ -91,6 +108,22 @@ func walkSelections(selections ast.SelectionSet, prefix string, depth int, info 
 				fieldName = s.Alias
 			}
 			info.FieldCount++
+
+			// Count directives on this field
+			info.Directives += len(s.Directives)
+
+			// Measure argument depth
+			for _, arg := range s.Arguments {
+				argDepth := measureValueDepth(arg.Value, 1)
+				if argDepth > info.ArgumentDepth {
+					info.ArgumentDepth = argDepth
+				}
+			}
+
+			// Heuristic: field names ending in 's' (plural) are likely lists
+			if len(fieldName) > 1 && fieldName[len(fieldName)-1] == 's' {
+				info.ListsRequested++
+			}
 
 			path := fieldName
 			if prefix != "" {
@@ -108,13 +141,14 @@ func walkSelections(selections ast.SelectionSet, prefix string, depth int, info 
 			}
 
 		case *ast.InlineFragment:
+			info.FragmentSpreadCount++
 			if s.SelectionSet != nil {
 				walkSelections(s.SelectionSet, prefix, depth, info, doc, visited)
 			}
 
 		case *ast.FragmentSpread:
+			info.FragmentSpreadCount++
 			fragmentName := s.Name
-			// Prevent infinite recursion on circular fragment references
 			if visited[fragmentName] {
 				continue
 			}
@@ -126,4 +160,21 @@ func walkSelections(selections ast.SelectionSet, prefix string, depth int, info 
 			}
 		}
 	}
+}
+
+// measureValueDepth recursively measures the maximum nesting depth of argument values.
+func measureValueDepth(v *ast.Value, depth int) int {
+	if v == nil {
+		return depth
+	}
+	maxDepth := depth
+	for _, child := range v.Children {
+		if child.Value != nil {
+			childDepth := measureValueDepth(child.Value, depth+1)
+			if childDepth > maxDepth {
+				maxDepth = childDepth
+			}
+		}
+	}
+	return maxDepth
 }

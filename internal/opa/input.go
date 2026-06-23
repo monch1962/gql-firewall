@@ -26,7 +26,7 @@ type Input struct {
 }
 
 // BuildInput converts a parser.QueryInfo into the extended OPA Input.
-// Fields not yet populated by the parser are left as zero values.
+// All parser-extracted fields are now populated, enabling all 12 Rego rules.
 func BuildInput(info *parser.QueryInfo, store *DataStore) *Input {
 	input := &Input{
 		OperationType:          info.OperationType,
@@ -35,12 +35,12 @@ func BuildInput(info *parser.QueryInfo, store *DataStore) *Input {
 		FieldCount:             info.FieldCount,
 		FieldPaths:             info.FieldPaths,
 		TenantID:               info.TenantID,
-		Directives:             0,
-		BatchSize:              0,
-		ArgumentDepth:          0,
-		ListsRequested:         0,
-		FragmentSpreadCount:    0,
-		QueryHash:              "",
+		Directives:             info.Directives,
+		BatchSize:              info.BatchSize,
+		ArgumentDepth:          info.ArgumentDepth,
+		ListsRequested:         info.ListsRequested,
+		FragmentSpreadCount:    info.FragmentSpreadCount,
+		QueryHash:              info.QueryHash,
 		RequirePersistedQueries: false,
 		FieldAllowlist:         nil,
 	}

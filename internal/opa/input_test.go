@@ -9,12 +9,18 @@ import (
 
 func TestBuildInput(t *testing.T) {
 	info := &parser.QueryInfo{
-		OperationType: "query",
-		OperationName: "GetUser",
-		Depth:         3,
-		FieldCount:    10,
-		FieldPaths:    []string{"user", "user.name"},
-		TenantID:      "acme",
+		OperationType:       "query",
+		OperationName:       "GetUser",
+		Depth:               3,
+		FieldCount:          10,
+		FieldPaths:          []string{"user", "user.name"},
+		TenantID:            "acme",
+		Directives:          2,
+		BatchSize:           1,
+		ArgumentDepth:       3,
+		ListsRequested:      1,
+		FragmentSpreadCount: 0,
+		QueryHash:           "a1b2c3d4",
 	}
 	store := NewDataStore()
 	store.SetParams(map[string]interface{}{"depth_limit": 10})
