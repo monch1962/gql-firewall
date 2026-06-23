@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/monch1962/gql-firewall/internal/rules"
+	"github.com/monch1962/gql-firewall/internal/opa"
 )
 
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
@@ -17,7 +17,7 @@ func gql(qry string) io.Reader {
 	return bytes.NewReader(mustJSON(graphQLBody{Query: qry}))
 }
 
-var passEval = &stubEvaluator{result: &rules.Result{Allowed: true}}
+var passEval = &stubEvaluator{result: &opa.Result{Allowed: true}}
 
 func testUpstream(t *testing.T, handler func(http.ResponseWriter, *http.Request)) *httptest.Server {
 	t.Helper()
@@ -105,7 +105,7 @@ func TestAttack_OPAReasonInjection(t *testing.T) {
 	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { t.Error("should not reach upstream") })
 	defer up.Close()
 
-	h := MustNew(up.URL, &stubEvaluator{result: &rules.Result{Allowed: false, Reason: `injected"`}})
+	h := MustNew(up.URL, &stubEvaluator{result: &opa.Result{Allowed: false, Reason: `injected"`}})
 	req := httptest.NewRequest("POST", "/graphql", gql("{ hello }"))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
