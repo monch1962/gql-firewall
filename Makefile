@@ -17,7 +17,7 @@ test:
 	$(OPA_BIN) test opa-policies/
 
 lint:
-	$(GOLANGCI_BIN) run --timeout 2m
+	PATH="/usr/local/go/bin:$(PATH)" $(GOLANGCI_BIN) run --timeout 2m
 
 vet:
 	$(GO_BIN) vet ./...
