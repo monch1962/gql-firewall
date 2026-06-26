@@ -105,6 +105,14 @@ All verified with TDD — tests written first, then defenses implemented.
 | **R72** | **Batch item with empty query string** | Returns 400 Bad Request | ✅ |
 | **R73** | **Content-Type charset variations** | Accepted (charset/encoding variations don't bypass) | ✅ |
 | **R74** | **Multi-value X-Forwarded-For header** | No crash; first value used by rate limiter | ✅ |
+| **R75** | **Admin API missing rate limiting** | Not wrapped (separate port; documented) | ✅ |
+| **R76** | **OPA sidecar HTTP conn exhaustion** | Transport configured: MaxIdleConns=10, IdleConnTimeout=30s | ✅ |
+| **R77** | **Path encoding: trailing slash / case** | `isGraphQLPath` verified against normalized path | ✅ |
+| **R78** | **Host header injection** | Upstream receives attacker Host; documented | ✅ |
+| **R79** | **Rate limiter zero burst blocks first** | Burst=0 means first request blocked (by design) | ✅ |
+| **R80** | **Empty OPA endpoint allows all** | Guarded by CLI validation on startup | ✅ |
+| **R81** | **Very long valid field path** | Schema validates without overflow | ✅ |
+| **R82** | **Self-referencing schema types** | No infinite loop in Validate() | ✅ |
 
 ## CLI Flags
 
@@ -168,8 +176,8 @@ All verified with TDD — tests written first, then defenses implemented.
 - **OPA decision caching** — Avoids redundant OPA calls for repeated query patterns. ~200µs vs ~2ms RPC on cache hit.
 
 ### Security
-- **75 attack vectors covered** (12 OPA Rego + 63 red-team HTTP transport)
-- **Red-team verified** — 63 attack simulation tests across the Go proxy. Real vulnerabilities found and patched across 6 rounds.
+- **84 attack vectors covered** (12 OPA Rego + 72 red-team HTTP transport)
+- **Red-team verified** — 72 attack simulation tests across the Go proxy. Real vulnerabilities found and patched across 7 rounds.
 - **Deny-override model** — requests pass by default, blocked only by matching deny rules (safe for phased rollout)
 - **Sensitive field blocking** — SSN, passwords, credit cards, API keys, secrets
 - **Introspection blocking** — direct + nested paths
@@ -441,9 +449,9 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           261 tests — server(25), parser(121), proxy(88), integration(23), opa(63), metrics(14), ratelimit(7)
+Go:           269 tests — server(25), parser(123), proxy(96), integration(23), opa(63), metrics(14), ratelimit(7)
 OPA/Rego:     37 tests  — 12 attack categories, edge cases, combined rules, operation-name allowlist
-Total:       298 tests  — all passing
+Total:       306 tests  — all passing
 ```
 
 ```bash
