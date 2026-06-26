@@ -167,7 +167,10 @@ func hasJSONContentType(headers http.Header) bool {
 func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
-	r.Body = http.MaxBytesReader(w, r.Body, h.MaxBodyBytes)
+	// Apply body size limit only when positive (0 or negative = unlimited)
+	if h.MaxBodyBytes > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, h.MaxBodyBytes)
+	}
 
 	bodyBytes, err := io.ReadAll(r.Body)
 	r.Body.Close()

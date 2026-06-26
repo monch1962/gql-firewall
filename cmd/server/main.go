@@ -75,6 +75,11 @@ func main() {
 		log.Fatal("--opa and --opa-embed are mutually exclusive")
 	}
 
+	// Validate flags with non-positive defaults
+	if *maxBodyMB < 0 {
+		log.Fatal("--max-body-mb must be >= 0 (0 = unlimited)")
+	}
+
 	// Load SDL schema for schema-aware validation
 	var schemaDoc *parser.SchemaInfo
 	if *schemaPath != "" {
