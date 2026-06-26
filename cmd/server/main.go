@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -45,6 +46,7 @@ func main() {
 		logFormat       = flag.String("log-format", "text", "Log format: text or json")
 		ratePerSec      = flag.Float64("rate-limit", 0, "Per-tenant/IP rate limit (requests/sec, 0 = disabled)")
 		rateBurst       = flag.Int("rate-burst", 0, "Rate limit burst size (0 = 2x rate-limit)")
+		allowedOpNames  = flag.String("allowed-operation-names", "", "Comma-separated list of allowed operation names (empty = allow all)")
 	)
 	flag.Parse()
 
@@ -119,6 +121,18 @@ func main() {
 				log.Fatalf("failed to parse params JSON: %v", err)
 			}
 			log.Printf("loaded OPA params from %s", *opaParams)
+		}
+
+		// Apply CLI-level params overrides
+		if *allowedOpNames != "" {
+			names := strings.Split(*allowedOpNames, ",")
+			params := opaStore.GetParams()
+			if params == nil {
+				params = make(map[string]interface{})
+			}
+			params["allowed_operation_names"] = names
+			opaStore.SetParams(params)
+			log.Printf("operation name allowlist enabled: %v", names)
 		}
 
 		opaEval, err = opa.NewEmbedded(opa.EmbedConfig{

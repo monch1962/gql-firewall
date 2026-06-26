@@ -331,3 +331,44 @@ test_no_extra_denies if {
         "params": {"depth_limit": 10, "max_field_count": 100}
     }
 }
+
+# ===========================================================================
+# Operation Name Allowlist
+# ===========================================================================
+test_named_operation_on_allowlist if {
+    allow with input as {
+        "depth": 1, "field_count": 1, "operation_type": "query",
+        "operation_name": "GetUser",
+        "field_paths": ["user"],
+        "params": {"depth_limit": 10, "allowed_operation_names": ["GetUser", "ListPosts"]}
+    }
+}
+
+test_unnamed_operation_blocked_when_allowlist_active if {
+    some msg in deny with input as {
+        "depth": 1, "field_count": 1, "operation_type": "query",
+        "operation_name": "",
+        "field_paths": ["user"],
+        "params": {"depth_limit": 10, "allowed_operation_names": ["GetUser"]}
+    }
+    contains(msg, "anonymous")
+}
+
+test_unlisted_operation_name_blocked if {
+    some msg in deny with input as {
+        "depth": 1, "field_count": 1, "operation_type": "query",
+        "operation_name": "DeleteAll",
+        "field_paths": ["user"],
+        "params": {"depth_limit": 10, "allowed_operation_names": ["GetUser"]}
+    }
+    contains(msg, "allowlist")
+}
+
+test_allowlist_inactive_allows_unnamed if {
+    allow with input as {
+        "depth": 1, "field_count": 1, "operation_type": "query",
+        "operation_name": "",
+        "field_paths": ["hello"],
+        "params": {"depth_limit": 10}
+    }
+}

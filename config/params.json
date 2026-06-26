@@ -9,5 +9,6 @@
   "max_lists_requested": 5,
   "max_fragment_spreads": 15,
   "cost_budget": 50,
-  "require_persisted_queries": false
+  "require_persisted_queries": false,
+  "allowed_operation_names": []
 }

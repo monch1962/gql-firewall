@@ -118,6 +118,7 @@ All verified with TDD — tests written first, then defenses implemented.
 | `--tls-cert` | `""` | TLS certificate file path |
 | `--tls-key` | `""` | TLS private key file path |
 | `--max-body-mb` | `1` | Maximum request body size in MB (0 = unlimited, must be ≥ 0) |
+| `--allowed-operation-names` | `""` | Comma-separated list of allowed operation names<br>(blocks unnamed + unlisted when non-empty) |
 
 ### Security Features
 
@@ -135,9 +136,10 @@ All verified with TDD — tests written first, then defenses implemented.
 | **Metrics isolation** | `--metrics-listen` | Traffic pattern leakage (M-4) |
 | **Graceful shutdown** | Built-in | Dropped requests on deploy (M-3) |
 | **Panic recovery** | Built-in | Process crash on handler panic (H1) |
-| **Security headers** | Built-in | MIME sniffing / clickjacking (H2) |
-| **Query parse timeout** | Built-in | CPU exhaustion via crafted queries (H3) |
-| **Upstream URL validation** | Built-in | Scheme injection / SSRF (H4) |
+|| **Security headers** | Built-in | MIME sniffing / clickjacking (H2) |
+|| **Query parse timeout** | Built-in | CPU exhaustion via crafted queries (H3) |
+|| **Upstream URL validation** | Built-in | Scheme injection / SSRF (H4) |
+|| **Operation name allowlist** | `--allowed-operation-names` | Anonymous/unlisted operation probing |
 
 ### Core
 - **GraphQL query parsing** — Parses queries, mutations, and subscriptions using `gqlparser/v2`. Extracts operation type, name, depth, field count, and full field paths.
@@ -270,6 +272,7 @@ All firewall parameters are injected as OPA data. Create a JSON file that mirror
 | `max_fragment_spreads` | number | 15 | Max fragment spreads per query |
 | `cost_budget` | number | 50 | Complexity budget (depth × field_count) |
 | `require_persisted_queries` | bool | false | Block dynamic (non-persisted) queries |
+| `allowed_operation_names` | array | `[]` | Only allow these operation names (blocks unnamed + unlisted) |
 
 ### OPA Policies
 
@@ -630,13 +633,13 @@ The following features align with the product's business model — a standalone 
 - **[OPA Policy Language](https://www.openpolicyagent.org/docs/latest/policy-language/)** — Official Rego reference
 
 
-### Near-term (Phase 1 — build on existing architecture)
+### Near-term (Phase 1 — build on existing architecture) ✅ Completed
 
-**1. Prometheus metrics endpoint** — Expose deny counters, latency histograms, and active tenant counts as Prometheus `/metrics`. This is the single most requested feature by mid-market platform teams monitoring their APIs. It also directly feeds into Datadog's agent, making the product immediately useful to Datadog's install base (exit path alignment).
+**1. Prometheus metrics endpoint** — Expose deny counters, latency histograms, and active tenant counts as Prometheus `/metrics`. **✅ Implemented.** `gql_firewall_requests_total`, `gql_firewall_requests_blocked_total`, `gql_firewall_request_duration_seconds`, `gql_firewall_active_tenants`, `gql_firewall_rule_evaluations_total`, `gql_firewall_config_reloads_total`, `gql_firewall_opa_requests_total`, and `gql_firewall_opa_audit_blocks_total` all exposed at `/metrics`.
 
-**2. GraphQL schema-aware validation** — Accept an SDL schema file (`--schema schema.graphql`). Use it to detect queries requesting fields that don't exist, arguments of the wrong type, or deprecated fields. This turns the firewall from a generic rate-limiter into a GraphQL-aware security tool — the key differentiator against Kong's generic Lua plugins.
+**2. GraphQL schema-aware validation** — Accept an SDL schema file (`--schema schema.graphql`). Use it to detect queries requesting fields that don't exist, arguments of the wrong type, or deprecated fields. **✅ Implemented.** Full schema validation with field existence checking, type coverage for Query/Mutation fields, and deprecation directive detection. See `SchemaInfo.Validate()`.
 
-**3. Operation-name-based allowlist** — Allow only known operation names in production (e.g. `query GetUser { ... }` but block arbitrary unnamed queries). This prevents attackers from probing the API surface with anonymous queries. Already partially supported by the OPA `require_persisted_queries` mode — wire it through the Go sidecar config.
+**3. Operation-name-based allowlist** — Allow only known operation names in production (e.g. `query GetUser { ... }` but block arbitrary unnamed queries). **✅ Implemented.** Use `--allowed-operation-names GetUser,ListPosts` to enable. Unnamed queries and unlisted names are blocked. Works with both embedded and sidecar OPA modes.
 
 ### Mid-term (Phase 2 — premium tier enablers)
 

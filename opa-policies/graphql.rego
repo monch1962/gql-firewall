@@ -131,6 +131,8 @@ field_on_allowlist(path) if {
 # Block specific operation types (e.g., subscriptions in prod).
 # Parameter: input.params.blocked_operations (array of operation types).
 # Parameter: input.params.allowed_operations (if set, only these are allowed).
+# Parameter: input.params.allowed_operation_names (if set, only named ops with
+# these names are allowed; unnamed queries are blocked when list is non-empty).
 
 deny contains msg if {
     some blocked in input.params.blocked_operations
@@ -142,6 +144,21 @@ deny contains msg if {
     count(input.params.allowed_operations) > 0
     count({op | op = input.params.allowed_operations[_]; op == input.operation_type}) == 0
     msg := sprintf("operation type %q is not allowed", [input.operation_type])
+}
+
+# Operation-name allowlist: when set, unnamed operations and operations whose
+# name is not in the list are blocked.
+deny contains msg if {
+    count(input.params.allowed_operation_names) > 0
+    input.operation_name == ""
+    msg := "anonymous queries are blocked when operation name allowlist is active"
+}
+
+deny contains msg if {
+    count(input.params.allowed_operation_names) > 0
+    input.operation_name != ""
+    count({name | name = input.params.allowed_operation_names[_]; name == input.operation_name}) == 0
+    msg := sprintf("operation name %q is not in the allowlist", [input.operation_name])
 }
 
 # =============================================================================
