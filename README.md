@@ -78,6 +78,23 @@ All verified with TDD — tests written first, then defenses implemented.
 | **R45** | **Deep argument nesting** (7 levels) | `argument_depth` measured correctly | ✅ |
 | **R46** | **Complex variable types** `[[[String!]!]!]!` | Parser extracts variable count | ✅ |
 | **R47** | **Very long field argument string** (50K chars) | Parses without OOM | ✅ |
+| **R48** | **Deeply nested JSON body** (10k levels) | Rejected — `json.Decoder` has depth limits | ✅ |
+| **R49** | **Trailing garbage after JSON** `{...}extra` | `dec.More()` check rejects trailing data | ✅ |
+| **R50** | **Rate limiter memory exhaustion** (10k keys) | Bucket cleanup removes stale keys every minute | ✅ |
+| **R51** | **Admin API body limit** | `10MB MaxBytesReader` on PUSH handlers | ✅ |
+| **R52** | **POST with query in URL params only** | Body takes precedence; empty body → 400 | ✅ |
+| **R53** | **Very many arguments on field** (500) | Parser handles correctly | ✅ |
+| **R54** | **Non-standard methods** (OPTIONS/PUT/DELETE) | Pass through without inspection (correct) | ✅ |
+| **R55** | **Null bytes in JSON strings** | Go's JSON decoder rejects null bytes | ✅ |
+| **R56** | **Rate limiter concurrent race** (50 goroutines) | Mutex-guarded bucket map, no race | ✅ |
+| **R57** | **Very many fields in query** (10k) | Parser extracts all field paths correctly | ✅ |
+| **R58** | **Batch with 1000+ items** | Each item inspected independently | ✅ |
+| **R59** | **Very large number in variables JSON** | Stored as `json.RawMessage`, no overflow | ✅ |
+| **R60** | **Multiple Content-Type values** | Go uses first value (`application/json` accepted) | ✅ |
+| **R61** | **GET with invalid variables JSON** | Variables error is non-fatal, query still forwarded | ✅ |
+| **R62** | **Field names matching directive names** | `skip`, `include`, `deprecated` as field names | ✅ |
+| **R63** | **Admin API enormous payload** (10MB config) | `MaxBytesReader` limits body, returns error | ✅ |
+| **R64** | **Multiple GraphQL queries in one body field** | Parser fails on combined syntax → 400 | ✅ |
 
 ## CLI Flags
 
@@ -139,8 +156,8 @@ All verified with TDD — tests written first, then defenses implemented.
 - **OPA decision caching** — Avoids redundant OPA calls for repeated query patterns. ~200µs vs ~2ms RPC on cache hit.
 
 ### Security
-- **47 attack vectors covered** (12 OPA Rego + 35 red-team HTTP transport)
-- **Red-team verified** — 47 attack simulation tests across the Go proxy. Real vulnerabilities found and patched across 4 rounds.
+- **64 attack vectors covered** (12 OPA Rego + 52 red-team HTTP transport)
+- **Red-team verified** — 52 attack simulation tests across the Go proxy. Real vulnerabilities found and patched across 5 rounds.
 - **Deny-override model** — requests pass by default, blocked only by matching deny rules (safe for phased rollout)
 - **Sensitive field blocking** — SSN, passwords, credit cards, API keys, secrets
 - **Introspection blocking** — direct + nested paths
@@ -411,9 +428,9 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           225 tests — server(25), parser(113), proxy(56), integration(23), opa(63), metrics(6), ratelimit(6)
+Go:           243 tests — server(25), parser(113), proxy(74), integration(23), opa(63), metrics(6), ratelimit(6)
 OPA/Rego:     33 tests  — 12 attack categories, edge cases, combined rules
-Total:       258 tests  — all passing
+Total:       276 tests  — all passing
 ```
 
 ```bash

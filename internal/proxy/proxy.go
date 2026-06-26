@@ -194,9 +194,17 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Single request
+	// Single request — use json.Decoder to reject trailing garbage
 	var gqlReq graphQLBody
-	if err := json.Unmarshal(bodyBytes, &gqlReq); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(bodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&gqlReq); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("json")), http.StatusBadRequest)
+		metrics.RecordRequest("error", "unknown", time.Since(start))
+		return
+	}
+	// Reject trailing data after the JSON object (injection via garbage suffix)
+	if dec.More() {
 		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("json")), http.StatusBadRequest)
 		metrics.RecordRequest("error", "unknown", time.Since(start))
 		return

@@ -293,6 +293,8 @@ func adminMux(token string, eval *compositeEvaluator, opaEval opa.Evaluator, sto
 			http.Error(w, "use POST or PUT", http.StatusMethodNotAllowed)
 			return
 		}
+		// Apply body limit to prevent OOM from oversized config payloads
+		r.Body = http.MaxBytesReader(w, r.Body, 10*1024*1024) // 10MB limit
 		var params map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
 			http.Error(w, fmt.Sprintf(`{"error": "invalid JSON: %s"}`, err), http.StatusBadRequest)
@@ -327,6 +329,7 @@ func adminMux(token string, eval *compositeEvaluator, opaEval opa.Evaluator, sto
 			json.NewEncoder(w).Encode(cfg)
 
 		case http.MethodPost, http.MethodPut:
+			r.Body = http.MaxBytesReader(w, r.Body, 10*1024*1024) // 10MB limit
 			var cfg map[string]interface{}
 			if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 				http.Error(w, fmt.Sprintf("invalid JSON: %s", err), http.StatusBadRequest)
