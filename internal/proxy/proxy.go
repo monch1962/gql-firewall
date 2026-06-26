@@ -65,7 +65,11 @@ type graphQLBody struct {
 	Query         string          `json:"query"`
 	OperationName string          `json:"operationName,omitempty"`
 	Variables     json.RawMessage `json:"variables,omitempty"`
+	Extensions    json.RawMessage `json:"extensions,omitempty"`
 }
+
+// batchGraphQLBody is used for batch requests sent as JSON arrays.
+type batchGraphQLBody []graphQLBody
 
 // Handler is an HTTP handler that proxies GraphQL requests through a firewall.
 type Handler struct {
@@ -114,13 +118,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer h.recoverPanic(w, r)
 	}
 
-	if r.Method == http.MethodPost && isGraphQLPath(r.URL.Path) {
-		if !hasJSONContentType(r.Header) {
-			http.Error(w, `{"error": "Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
+	if isGraphQLPath(r.URL.Path) {
+		switch r.Method {
+		case http.MethodPost:
+			if !hasJSONContentType(r.Header) {
+				http.Error(w, `{"error": "Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
+				return
+			}
+			h.handleGraphQL(w, r)
+			return
+		case http.MethodGet:
+			h.handleGraphQLGet(w, r)
 			return
 		}
-		h.handleGraphQL(w, r)
-		return
 	}
 	h.upstream.ServeHTTP(w, r)
 }
@@ -172,6 +182,16 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Detect batch request: body starts with '['
+	trimmed := bytes.TrimLeft(bodyBytes, " 	\r\n")
+	isBatch := len(trimmed) > 0 && trimmed[0] == '['
+
+	if isBatch {
+		h.handleGraphQLBatch(w, r, bodyBytes, start)
+		return
+	}
+
+	// Single request
 	var gqlReq graphQLBody
 	if err := json.Unmarshal(bodyBytes, &gqlReq); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("json")), http.StatusBadRequest)
@@ -193,6 +213,116 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enrich with variables from request
+	if len(gqlReq.Variables) > 0 {
+		queryInfo.RequestVariables = gqlReq.Variables
+	}
+
+	h.evaluateAndForward(w, r, bodyBytes, queryInfo, start)
+}
+
+// handleGraphQLGet handles GET requests to GraphQL endpoints.
+// The query is read from the URL query parameter, variables from JSON in the
+// variables query parameter. This follows the GraphQL-over-HTTP specification.
+func (h *Handler) handleGraphQLGet(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
+	query := r.URL.Query().Get("query")
+	if query == "" {
+		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("query")), http.StatusBadRequest)
+		metrics.RecordRequest("error", "unknown", time.Since(start))
+		return
+	}
+
+	queryInfo, err := parseQueryWithTimeout(query, h.ParseTimeout)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("query")), http.StatusBadRequest)
+		metrics.RecordRequest("error", "unknown", time.Since(start))
+		return
+	}
+
+	// Parse variables from query parameter (JSON object)
+	if varsParam := r.URL.Query().Get("variables"); varsParam != "" {
+		queryInfo.RequestVariables = json.RawMessage(varsParam)
+	}
+
+	// Build the request body for forwarding to upstream
+	forwardBody, _ := json.Marshal(graphQLBody{
+		Query:         query,
+		OperationName: r.URL.Query().Get("operationName"),
+		Variables:     queryInfo.RequestVariables,
+	})
+
+	h.evaluateAndForward(w, r, forwardBody, queryInfo, start)
+}
+
+// handleGraphQLBatch handles batch GraphQL requests (JSON array of query objects).
+// Each query is parsed and evaluated independently. If ANY query is blocked by
+// OPA, the entire batch is rejected.
+func (h *Handler) handleGraphQLBatch(w http.ResponseWriter, r *http.Request, bodyBytes []byte, start time.Time) {
+	var batch batchGraphQLBody
+	if err := json.Unmarshal(bodyBytes, &batch); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("json")), http.StatusBadRequest)
+		metrics.RecordRequest("error", "unknown", time.Since(start))
+		return
+	}
+
+	if len(batch) == 0 {
+		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("query")), http.StatusBadRequest)
+		metrics.RecordRequest("error", "unknown", time.Since(start))
+		return
+	}
+
+	// Evaluate each query in the batch
+	firstOpType := "unknown"
+	for i, req := range batch {
+		if req.Query == "" {
+			http.Error(w, fmt.Sprintf(`{"error": "batch item %d has empty query"}`, i), http.StatusBadRequest)
+			metrics.RecordRequest("error", "unknown", time.Since(start))
+			return
+		}
+		queryInfo, err := parseQueryWithTimeout(req.Query, h.ParseTimeout)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error": "invalid GraphQL query at batch index %d"}`, i), http.StatusBadRequest)
+			metrics.RecordRequest("error", "unknown", time.Since(start))
+			return
+		}
+		if len(req.Variables) > 0 {
+			queryInfo.RequestVariables = req.Variables
+		}
+		if i == 0 {
+			firstOpType = queryInfo.OperationType
+		}
+
+		result, err := h.evaluator.Evaluate(queryInfo)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("eval")), http.StatusInternalServerError)
+			metrics.RecordRequest("error", queryInfo.OperationType, time.Since(start))
+			return
+		}
+		if !result.Allowed {
+			w.Header().Set("Content-Type", "application/json")
+			setSecurityHeaders(w)
+			w.WriteHeader(http.StatusForbidden)
+			reason := sanitizeReason(result.Reason)
+			fmt.Fprintf(w, `{"error": "request blocked", "reason": %q}`, reason)
+			metrics.RecordBlock(result.Reason)
+			metrics.RecordRequest("blocked", queryInfo.OperationType, time.Since(start))
+			return
+		}
+	}
+
+	metrics.RecordRequest("allowed", firstOpType, time.Since(start))
+
+	// All queries passed — forward the original batch body
+	setSecurityHeaders(w)
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	r.ContentLength = int64(len(bodyBytes))
+	h.upstream.ServeHTTP(w, r)
+}
+
+// evaluateAndForward evaluates a single query and forwards it upstream if allowed.
+func (h *Handler) evaluateAndForward(w http.ResponseWriter, r *http.Request, bodyBytes []byte, queryInfo *parser.QueryInfo, start time.Time) {
 	// Extract tenant from X-API-Key header
 	if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
 		queryInfo.TenantID = extractTenantID(apiKey)

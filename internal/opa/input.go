@@ -1,6 +1,10 @@
 package opa
 
-import "github.com/monch1962/gql-firewall/internal/parser"
+import (
+	"encoding/json"
+
+	"github.com/monch1962/gql-firewall/internal/parser"
+)
 
 // Input is the extended query information sent to OPA for evaluation.
 type Input struct {
@@ -21,6 +25,7 @@ type Input struct {
 	OperationDirectives      int                    `json:"operation_directives,omitempty"`
 	InlineFragmentTypesCount int                    `json:"inline_fragment_types_count,omitempty"`
 	FragmentCount            int                    `json:"fragment_count,omitempty"`
+	RequestVariables         map[string]interface{} `json:"request_variables,omitempty"`
 	RequirePersistedQueries  bool                   `json:"require_persisted_queries,omitempty"`
 	FieldAllowlist           []string               `json:"field_allowlist,omitempty"`
 	Params                   map[string]interface{} `json:"params,omitempty"`
@@ -49,6 +54,12 @@ func BuildInput(info *parser.QueryInfo, store *DataStore) *Input {
 		FragmentCount:            info.FragmentCount,
 		RequirePersistedQueries:  false,
 		FieldAllowlist:           nil,
+	}
+	if len(info.RequestVariables) > 0 {
+		var vars map[string]interface{}
+		if err := json.Unmarshal(info.RequestVariables, &vars); err == nil {
+			input.RequestVariables = vars
+		}
 	}
 	if store != nil {
 		input.Params = store.GetParams()

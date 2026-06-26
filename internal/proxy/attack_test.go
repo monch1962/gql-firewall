@@ -128,20 +128,60 @@ func TestAttack_DoubleContentType(t *testing.T) {
 	_ = callCount
 }
 
-// R8: Attack — GET /graphql with body (should pass through, not evaluate)
-func TestAttack_GETWithGraphQLBody(t *testing.T) {
+// R8: Attack — GET /graphql without query parameter should 400
+func TestAttack_GETWithoutQuery(t *testing.T) {
 	callCount := 0
 	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { callCount++; w.WriteHeader(http.StatusOK) })
 	defer up.Close()
 
-	h := MustNew(up.URL, passEval)
-	req := httptest.NewRequest("GET", "/graphql", gql("{ hello }"))
-	req.Header.Set("Content-Type", "application/json")
+	h := MustNew(up.URL, &stubEvaluator{result: &opa.Result{Allowed: false, Reason: "test"}})
+	req := httptest.NewRequest("GET", "/graphql", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if callCount != 0 {
+		t.Errorf("expected GET without query to be blocked, upstream called %d times", callCount)
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for GET without query, got %d", w.Code)
+	}
+}
+
+// R8b: Attack — GET /graphql with body and query param is intercepted
+func TestAttack_GETWithQueryIntercepted(t *testing.T) {
+	callCount := 0
+	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { callCount++; w.WriteHeader(http.StatusOK) })
+	defer up.Close()
+
+	h := MustNew(up.URL, &stubEvaluator{result: &opa.Result{Allowed: false, Reason: "depth exceeded"}})
+	req := httptest.NewRequest("GET", "/graphql?query={hello}", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if callCount != 0 {
+		t.Errorf("expected GET with query to be blocked, upstream called %d times", callCount)
+	}
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for blocked GET query, got %d", w.Code)
+	}
+}
+
+// R8c: GET /graphql?query=... with allowed eval should forward
+func TestAttack_GETWithQueryForwarded(t *testing.T) {
+	callCount := 0
+	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { callCount++; w.WriteHeader(http.StatusOK) })
+	defer up.Close()
+
+	h := MustNew(up.URL, &stubEvaluator{result: &opa.Result{Allowed: true}})
+	req := httptest.NewRequest("GET", "/graphql?query={hello}", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
 	if callCount != 1 {
-		t.Errorf("expected GET to pass through, got %d calls", callCount)
+		t.Errorf("expected GET with allowed query to be forwarded, upstream called %d times", callCount)
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for allowed GET query, got %d", w.Code)
 	}
 }
 
