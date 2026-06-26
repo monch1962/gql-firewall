@@ -1,5 +1,3 @@
-// Package parser provides GraphQL query analysis — parsing, depth calculation,
-// field path extraction, and operation type detection.
 package parser
 
 import (
@@ -40,9 +38,10 @@ func parseGraphQL(query string) (*QueryInfo, error) {
 	hash := sha256.Sum256([]byte(query))
 
 	info := &QueryInfo{
-		FieldPaths: []string{},
-		BatchSize:  len(doc.Operations),
-		QueryHash:  fmt.Sprintf("%x", hash[:8]),
+		FieldPaths:    []string{},
+		BatchSize:     len(doc.Operations),
+		QueryHash:     fmt.Sprintf("%x", hash[:8]),
+		FragmentCount: len(doc.Fragments),
 	}
 
 	// Iterate ALL operations for full analysis
@@ -62,10 +61,29 @@ func parseGraphQL(query string) (*QueryInfo, error) {
 			currentInfo.OperationType = "query"
 		}
 
+		// Count operation-level directives
+		currentInfo.OperationDirectives += len(op.Directives)
+
+		// Extract variable definitions
+		currentInfo.VariableCount = len(op.VariableDefinitions)
+		for _, vd := range op.VariableDefinitions {
+			if vd.DefaultValue != nil {
+				currentInfo.HasDefaultVariables = true
+				break
+			}
+		}
+
 		// Track visited fragments to prevent infinite recursion on circular refs
 		currentInfo.FieldPaths = []string{}
 		visited := make(map[string]bool)
 		walkSelections(op.SelectionSet, "", 0, currentInfo, doc, visited)
+
+		// Count fragment definition directives (for inline + named fragments,
+		// directives are counted inside walkSelections; here we count directives
+		// on the fragment definitions themselves)
+		for _, frag := range doc.Fragments {
+			currentInfo.Directives += len(frag.Directives)
+		}
 
 		// Aggregate — use the first operation's name/type as representative
 		if info.OperationName == "" {
@@ -93,6 +111,18 @@ func parseGraphQL(query string) (*QueryInfo, error) {
 		}
 		if currentInfo.FragmentSpreadCount > info.FragmentSpreadCount {
 			info.FragmentSpreadCount = currentInfo.FragmentSpreadCount
+		}
+		if currentInfo.VariableCount > info.VariableCount {
+			info.VariableCount = currentInfo.VariableCount
+		}
+		if currentInfo.OperationDirectives > info.OperationDirectives {
+			info.OperationDirectives = currentInfo.OperationDirectives
+		}
+		if currentInfo.InlineFragmentTypesCount > info.InlineFragmentTypesCount {
+			info.InlineFragmentTypesCount = currentInfo.InlineFragmentTypesCount
+		}
+		if currentInfo.HasDefaultVariables {
+			info.HasDefaultVariables = true
 		}
 		info.FieldPaths = append(info.FieldPaths, currentInfo.FieldPaths...)
 	}
@@ -143,12 +173,25 @@ func walkSelections(selections ast.SelectionSet, prefix string, depth int, info 
 
 		case *ast.InlineFragment:
 			info.FragmentSpreadCount++
+
+			// Count directives on this inline fragment
+			info.Directives += len(s.Directives)
+
+			// Track unique type conditions for inline fragments
+			if s.TypeCondition != "" {
+				info.InlineFragmentTypesCount++
+			}
+
 			if s.SelectionSet != nil {
 				walkSelections(s.SelectionSet, prefix, depth, info, doc, visited)
 			}
 
 		case *ast.FragmentSpread:
 			info.FragmentSpreadCount++
+
+			// Count directives on this fragment spread
+			info.Directives += len(s.Directives)
+
 			fragmentName := s.Name
 			// Prevent infinite recursion on circular fragment references
 			if visited[fragmentName] {
@@ -165,6 +208,8 @@ func walkSelections(selections ast.SelectionSet, prefix string, depth int, info 
 }
 
 // measureValueDepth recursively measures the maximum nesting depth of argument values.
+// Handles all GraphQL value types: Variable, IntValue, FloatValue, StringValue,
+// BooleanValue, NullValue, EnumValue, ListValue, ObjectValue.
 func measureValueDepth(v *ast.Value, depth int) int {
 	if v == nil {
 		return depth
@@ -176,6 +221,14 @@ func measureValueDepth(v *ast.Value, depth int) int {
 			if childDepth > maxDepth {
 				maxDepth = childDepth
 			}
+		}
+	}
+	// Check VariableDefinition.DefaultValue (the $var reference has a back-link
+	// to its definition, and the definition may have a nested default value)
+	if v.VariableDefinition != nil && v.VariableDefinition.DefaultValue != nil {
+		defaultDepth := measureValueDepth(v.VariableDefinition.DefaultValue, depth+1)
+		if defaultDepth > maxDepth {
+			maxDepth = defaultDepth
 		}
 	}
 	return maxDepth
