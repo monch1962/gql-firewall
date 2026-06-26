@@ -95,6 +95,16 @@ All verified with TDD — tests written first, then defenses implemented.
 | **R62** | **Field names matching directive names** | `skip`, `include`, `deprecated` as field names | ✅ |
 | **R63** | **Admin API enormous payload** (10MB config) | `MaxBytesReader` limits body, returns error | ✅ |
 | **R64** | **Multiple GraphQL queries in one body field** | Parser fails on combined syntax → 400 | ✅ |
+| **R65** | **CRLF injection in OPA reason** (response splitting) | `sanitizeReason()` strips chars < 32 and > 126 | ✅ |
+| **R66** | **Admin API empty token** (no auth) | By design for backward compat; documented | ✅ |
+| **R67** | **Rate limiter X-Forwarded-For** | Key derivation now uses first XFF value if present | ✅ |
+| **R68** | **Mutation fields bypass schema validation** | `Validate()` now checks Mutation/Subscription root types | ✅ |
+| **R69** | **Conjunctive query (many fields + args + depth)** | Parser handles complex combinations correctly | ✅ |
+| **R70** | **Admin API GET to /admin/rules/update** | Returns 405 Method Not Allowed | ✅ |
+| **R71** | **Very large integer in argument** (`999...`) | Stored as string in AST, no overflow | ✅ |
+| **R72** | **Batch item with empty query string** | Returns 400 Bad Request | ✅ |
+| **R73** | **Content-Type charset variations** | Accepted (charset/encoding variations don't bypass) | ✅ |
+| **R74** | **Multi-value X-Forwarded-For header** | No crash; first value used by rate limiter | ✅ |
 
 ## CLI Flags
 
@@ -158,8 +168,8 @@ All verified with TDD — tests written first, then defenses implemented.
 - **OPA decision caching** — Avoids redundant OPA calls for repeated query patterns. ~200µs vs ~2ms RPC on cache hit.
 
 ### Security
-- **64 attack vectors covered** (12 OPA Rego + 52 red-team HTTP transport)
-- **Red-team verified** — 52 attack simulation tests across the Go proxy. Real vulnerabilities found and patched across 5 rounds.
+- **75 attack vectors covered** (12 OPA Rego + 63 red-team HTTP transport)
+- **Red-team verified** — 63 attack simulation tests across the Go proxy. Real vulnerabilities found and patched across 6 rounds.
 - **Deny-override model** — requests pass by default, blocked only by matching deny rules (safe for phased rollout)
 - **Sensitive field blocking** — SSN, passwords, credit cards, API keys, secrets
 - **Introspection blocking** — direct + nested paths
@@ -416,7 +426,7 @@ gql-firewall/
 │   ├── parser/                    # GraphQL query analysis (45 tests, including Rust compat)
 │   ├── opa/                       # OPA evaluator: sidecar, embedded, data store, input builder (63 tests)
 │   ├── metrics/                   # Prometheus instrumentation (6 tests)
-|│   ├── proxy/                     # HTTP reverse proxy (56 tests, including 25 red-team + 8 hardening + 9 input handling)
+│   ├── proxy/                     # HTTP reverse proxy (88 tests, including 39 red-team + 8 hardening + 9 input handling + 10 round 6)
 │   ├── ratelimit/                 # Token-bucket rate limiter (6 tests)
 │   ├── testutil/                  # Shared test helpers  
 │   └── integration/               # End-to-end pipeline tests (23 tests, including 19 e2e HTTP tests)
@@ -431,9 +441,9 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           243 tests — server(25), parser(113), proxy(74), integration(23), opa(63), metrics(6), ratelimit(6)
-OPA/Rego:     33 tests  — 12 attack categories, edge cases, combined rules
-Total:       276 tests  — all passing
+Go:           261 tests — server(25), parser(121), proxy(88), integration(23), opa(63), metrics(14), ratelimit(7)
+OPA/Rego:     37 tests  — 12 attack categories, edge cases, combined rules, operation-name allowlist
+Total:       298 tests  — all passing
 ```
 
 ```bash

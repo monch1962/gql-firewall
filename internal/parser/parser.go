@@ -79,6 +79,7 @@ func LoadSchemaFromBytes(data []byte, name string) (*SchemaInfo, error) {
 }
 
 // Validate checks if the query's fields exist in the schema.
+// Checks Query, Mutation, and Subscription root types.
 func (s *SchemaInfo) Validate(info *QueryInfo) (bool, string) {
 	for _, path := range info.FieldPaths {
 		parts := splitPath(path)
@@ -86,7 +87,16 @@ func (s *SchemaInfo) Validate(info *QueryInfo) (bool, string) {
 			continue
 		}
 
-		currentType := s.Schema.Query
+		// Determine which root type to check based on operation type
+		var currentType *ast.Definition
+		switch info.OperationType {
+		case "mutation":
+			currentType = s.Schema.Mutation
+		case "subscription":
+			currentType = s.Schema.Subscription
+		default:
+			currentType = s.Schema.Query
+		}
 		if currentType == nil {
 			continue
 		}

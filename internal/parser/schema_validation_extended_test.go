@@ -134,3 +134,48 @@ func TestValidate_InputTypeArgument(t *testing.T) {
 		t.Errorf("expected input type field to validate: %s", msg)
 	}
 }
+
+func TestValidate_MutationFieldExists(t *testing.T) {
+	sdl := `
+		scalar String
+		scalar Int
+		type Mutation {
+			createUser(name: String!): User
+		}
+		type Query {
+			ping: String
+		}
+		type User {
+			id: Int
+			name: String
+		}
+	`
+	schema := buildTestSchema(sdl)
+
+	tests := []struct {
+		name      string
+		opType    string
+		paths     []string
+		wantOK    bool
+	}{
+		{"query field on Query type", "query", []string{"ping"}, true},
+		{"mutation field on Mutation type", "mutation", []string{"createUser"}, true},
+		{"nested mutation field", "mutation", []string{"createUser.id"}, true},
+		{"deeper nested", "mutation", []string{"createUser.name"}, true},
+		{"unknown field on Mutation", "mutation", []string{"createUser.nonexistent"}, false},
+		{"unknown mutation root field", "mutation", []string{"deleteUser"}, false},
+		{"query field in mutation mode", "mutation", []string{"ping"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := &QueryInfo{
+				OperationType: tt.opType,
+				FieldPaths:    tt.paths,
+			}
+			ok, _ := schema.Validate(info)
+			if ok != tt.wantOK {
+				t.Errorf("Validate(operation_type=%q, paths=%v) = %v, want %v", tt.opType, tt.paths, ok, tt.wantOK)
+			}
+		})
+	}
+}

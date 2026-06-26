@@ -249,6 +249,15 @@ func main() {
 func rateLimitMiddleware(rl *ratelimit.Limiter, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.RemoteAddr
+		// Use X-Forwarded-For if present (first address in chain)
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if idx := strings.IndexByte(xff, ','); idx > 0 {
+				key = strings.TrimSpace(xff[:idx])
+			} else {
+				key = strings.TrimSpace(xff)
+			}
+		}
+		// Override with API key if available
 		if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
 			key = apiKey
 		}
