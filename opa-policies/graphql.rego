@@ -12,16 +12,45 @@ allow if {
 }
 
 # =============================================================================
+# ATTACK 0: Missing input fields (data integrity)
+# =============================================================================
+# Requests that are missing critical fields (depth, field_count, field_paths)
+# are malformed and should not be forwarded. This prevents undefined-value
+# bypasses in downstream rules.
+
+missing_field contains f if {
+    some f in ["depth", "field_count", "field_paths"]
+    not input[f]
+}
+
+deny contains msg if {
+    missing_field[f]
+    msg := sprintf("malformed request: missing required field %q", [f])
+}
+
+# Explicit null-value check catches fields that exist but are set to null
+missing_field contains f if {
+    some f in ["depth", "field_count", "field_paths"]
+    input[f] == null
+}
+
+# =============================================================================
 # ATTACK 1: Introspection Abuse (OWASP API8 — Injection)
 # =============================================================================
-# Attackers query __schema, __type, or __typename to discover the full API
-# surface, field definitions, arguments, and deprecation notices.
+# Attackers query __schema, __type, __typename, or other meta-fields to
+# discover the full API surface, field definitions, and arguments.
+# Extended list covers standard and lesser-known introspection fields.
+
+introspection_fields := {
+    "__schema", "__type", "__typename",
+    "__isTypeOf", "__resolveReference", "__resolveType",
+    "__TypeKind", "__Field", "__InputValue", "__EnumValue",
+    "__Directive", "__DirectiveLocation",
+}
 
 deny contains "introspection queries are blocked" if {
     input.operation_name == "IntrospectionQuery"
 }
-
-introspection_fields := {"__schema", "__type", "__typename"}
 
 introspection_field_requested contains f if {
     some f in introspection_fields
@@ -220,6 +249,14 @@ deny contains "dynamic queries are not allowed" if {
     input.params.require_persisted_queries == true
     not input.operation_name
     not input.query_hash
+}
+
+# Empty-string bypass: when operation_name or query_hash is "" (empty string),
+# Rego treats it as defined (not `not`-able). Check explicitly.
+deny contains "dynamic queries are not allowed" if {
+    input.params.require_persisted_queries == true
+    input.operation_name == ""
+    input.query_hash == ""
 }
 
 deny contains msg if {

@@ -48,6 +48,39 @@ test_non_introspection_allowed if {
     }
 }
 
+# Extended introspection fields
+test_introspection_isTypeOf_blocked if {
+    some msg in deny with input as {
+        "depth": 1, "field_count": 1, "operation_type": "query",
+        "field_paths": ["__isTypeOf"], "params": {}
+    }
+    startswith(msg, "introspection field")
+}
+
+test_introspection_resolveReference_blocked if {
+    some msg in deny with input as {
+        "depth": 1, "field_count": 1, "operation_type": "query",
+        "field_paths": ["__resolveReference"], "params": {}
+    }
+    startswith(msg, "introspection field")
+}
+
+test_introspection_resolveType_blocked if {
+    some msg in deny with input as {
+        "depth": 1, "field_count": 1, "operation_type": "query",
+        "field_paths": ["__resolveType"], "params": {}
+    }
+    startswith(msg, "introspection field")
+}
+
+test_introspection_TypeKind_blocked if {
+    some msg in deny with input as {
+        "depth": 1, "field_count": 1, "operation_type": "query",
+        "field_paths": ["__TypeKind"], "params": {}
+    }
+    startswith(msg, "introspection field")
+}
+
 # ===========================================================================
 # ATTACK 2: Depth-based DoS
 # ===========================================================================
@@ -319,6 +352,44 @@ test_dynamic_query_blocked_when_required if {
         "params": {"depth_limit": 10, "require_persisted_queries": true}
     }
     msg == "dynamic queries are not allowed"
+}
+
+# Persisted query — empty string bypass (CAPEC-affiliated)
+test_empty_opname_hash_blocked_when_required if {
+    some msg in deny with input as {
+        "depth": 1, "field_count": 1, "operation_type": "query",
+        "operation_name": "", "query_hash": "",
+        "field_paths": ["hello"],
+        "params": {"depth_limit": 10, "require_persisted_queries": true}
+    }
+    msg == "dynamic queries are not allowed"
+}
+
+# Missing required fields
+test_missing_depth_blocked if {
+    some msg in deny with input as {
+        "field_count": 1, "operation_type": "query",
+        "field_paths": ["hello"],
+        "params": {"depth_limit": 10}
+    }
+    contains(msg, "missing required field")
+}
+
+test_missing_field_count_blocked if {
+    some msg in deny with input as {
+        "depth": 1, "operation_type": "query",
+        "field_paths": ["hello"],
+        "params": {"depth_limit": 10}
+    }
+    contains(msg, "missing required field")
+}
+
+test_missing_field_paths_blocked if {
+    some msg in deny with input as {
+        "depth": 1, "field_count": 1, "operation_type": "query",
+        "params": {"depth_limit": 10}
+    }
+    contains(msg, "missing required field")
 }
 
 # ===========================================================================
