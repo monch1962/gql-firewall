@@ -25,6 +25,14 @@
 |---|---|---|---|
 | CAPEC-460 | HTTP Parameter Pollution (HPP) | 🟢 stdlib/OS protection | internal/proxy/capec_round_r2_hpp_test.go |
 
+## Round 4: R6 — Information Disclosure
+
+| CAPEC-ID | Name | Status | Test File |
+|---|---|---|---|
+| CAPEC-144 | Detect Unpublicized Web Services | 🟢 proxy passes through non-graphql paths | internal/proxy/capec_round_r6_disclosure_test.go |
+| CAPEC-383 | Harvesting Info via API Event Monitoring | 🟢 sanitizeError returns generic messages | internal/proxy/capec_round_r6_disclosure_test.go |
+| CAPEC-541 | Application Fingerprinting | 🟢 no identity-leaking headers on blocked responses | internal/proxy/capec_round_r6_disclosure_test.go |
+
 ## Batch-marked — inherently blocked (no TDD test needed)
 
 These patterns are handled by the OS/network stack, Go's standard library, or are irrelevant to an HTTP reverse proxy sidecar:
@@ -85,7 +93,38 @@ These patterns are handled by the OS/network stack, Go's standard library, or ar
 | CAPEC-581 | Security Software Footprinting | R6 | OS-level reconnaissance |
 | CAPEC-611 | BitSquatting | R6 | Domain squatting; not applicable |
 | CAPEC-621 | Analysis of Packet Timing and Sizes | R6 | Side-channel; proxy doesn't expose timing |
-| CAPEC-657 | Malicious Auto Update Spoofing | R8 | Supply-chain; not a software updater |
+| CAPEC-657 | Malicious Automated Software Update via Spoofing | R8 | Supply-chain; not a software updater |
+| CAPEC-37 | Retrieve Embedded Sensitive Data | R6 | Binary analysis; not applicable to proxy |
+| CAPEC-54 | Query System for Information | R6 | Too vague; covered by generic error handling |
+| CAPEC-65 | Sniff Application Code | R6 | Binary code analysis; not applicable |
+| CAPEC-85 | AJAX Footprinting | R6 | Web-app specific; proxy doesn't serve UI |
+| CAPEC-95 | WSDL Scanning | R6 | SOAP-specific; proxy handles GraphQL |
+| CAPEC-127 | Directory Indexing | R6 | Go HTTP handler doesn't serve directories |
+| CAPEC-143 | Detect Unpublicized Web Pages | R6 | Covered by CAPEC-144 admin discovery test |
+| CAPEC-149 | Predictable Temp File Names | R6 | No temp files; stateless proxy |
+| CAPEC-150 | Collect Data from Common Resource Locations | R6 | OS-level; not applicable to proxy |
+| CAPEC-155 | Screen Temporary Files | R6 | Not applicable; no file system interaction |
+| CAPEC-157 | Sniffing Attacks | R6 | Network-level; HTTPS in production |
+| CAPEC-158 | Sniffing Network Traffic | R6 | Network-level; HTTPS in production |
+| CAPEC-167 | White Box Reverse Engineering | R6 | Binary analysis; not applicable |
+| CAPEC-170 | Web Application Fingerprinting | R6 | Covered by CAPEC-541 identity leak test |
+| CAPEC-189 | Black Box Reverse Engineering | R6 | Binary analysis; not applicable |
+| CAPEC-190 | Reverse Engineer Executable | R6 | Binary analysis; not applicable |
+| CAPEC-191 | Read Sensitive Constants | R6 | Binary analysis; not applicable |
+| CAPEC-204 | Lifting Sensitive Data from Cache | R6 | Proxy has no cache |
+| CAPEC-215 | Fuzzing for Application Mapping | R6 | Integration-level; proxy forwards to upstream |
+| CAPEC-312 | Active OS Fingerprinting | R6 | OS-level; not applicable to HTTP proxy |
+| CAPEC-317 | IP ID Sequencing Probe | R6 | OS-level IP behavior |
+| CAPEC-472 | Browser Fingerprinting | R6 | Client-side; not applicable to server proxy |
+| CAPEC-573 | Process Footprinting | R6 | OS-level process enumeration |
+| CAPEC-574 | Services Footprinting | R6 | OS-level service enumeration |
+| CAPEC-575 | Account Footprinting | R6 | OS-level account enumeration |
+| CAPEC-576 | Group Permission Footprinting | R6 | OS-level permission enumeration |
+| CAPEC-577 | Owner Footprinting | R6 | OS-level ownership enumeration |
+| CAPEC-580 | System Footprinting | R6 | OS-level system info |
+| CAPEC-634 | Probe Audio and Video Peripherals | R6 | Hardware-level; not applicable to server |
+| CAPEC-639 | Probe System Files | R6 | File system; proxy has no file access |
+| CAPEC-694 | System Location Discovery | R6 | OS-level geolocation; not applicable |
 
 ## Excluded by project type
 
