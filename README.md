@@ -12,7 +12,7 @@ A **GraphQL firewall sidecar** that intercepts, inspects, and secures GraphQL re
 
 ## Attack Coverage
 
-gql-firewall's OPA Rego policies (33 tests) cover 12 attack categories, with 46 additional red-team attack simulation tests at the HTTP transport layer:
+gql-firewall's OPA Rego policies (45 tests) cover 12 attack categories, with 95 additional red-team attack simulation tests at the HTTP transport layer:
 
 ### OPA Policy Coverage (12 categories)
 
@@ -31,7 +31,7 @@ gql-firewall's OPA Rego policies (33 tests) cover 12 attack categories, with 46 
 | 11 | **Query Cost** — Cheap-to-parse, expensive-to-execute queries | `depth × field_count ≤ 50` budget | ✅ |
 | 12 | **Persisted Query Bypass** — Dynamic queries in PQ-only mode | `require_persisted_queries` + hash validation | ✅ |
 
-### Red-Team Verified Transport Protection (46 attack simulation tests)
+### Red-Team Verified Transport Protection (95 attack simulation tests)
 
 All verified with TDD — tests written first, then defenses implemented.
 
@@ -176,8 +176,8 @@ All verified with TDD — tests written first, then defenses implemented.
 - **OPA decision caching** — Avoids redundant OPA calls for repeated query patterns. ~200µs vs ~2ms RPC on cache hit.
 
 ### Security
-- **84 attack vectors covered** (12 OPA Rego + 72 red-team HTTP transport)
-- **Red-team verified** — 72 attack simulation tests across the Go proxy. Real vulnerabilities found and patched across 7 rounds.
+- **140 attack vectors covered** (45 OPA Rego + 95 red-team HTTP transport)
+- **Red-team verified** — 95 attack simulation tests across the Go proxy. Real vulnerabilities found and patched across 7 rounds.
 - **Deny-override model** — requests pass by default, blocked only by matching deny rules (safe for phased rollout)
 - **Sensitive field blocking** — SSN, passwords, credit cards, API keys, secrets
 - **Introspection blocking** — direct + nested paths
