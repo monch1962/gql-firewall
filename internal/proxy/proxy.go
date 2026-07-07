@@ -130,6 +130,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case http.MethodGet:
 			h.handleGraphQLGet(w, r)
 			return
+		default:
+			// Reject all other HTTP methods on GraphQL paths to prevent
+			// verb tampering bypass (CAPEC-274).
+			w.Header().Set("Allow", "GET, POST")
+			http.Error(w, `{"error": "method not allowed on GraphQL endpoint"}`, http.StatusMethodNotAllowed)
+			return
 		}
 	}
 	h.upstream.ServeHTTP(w, r)

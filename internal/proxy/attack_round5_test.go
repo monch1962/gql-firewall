@@ -158,8 +158,10 @@ func TestAttack_VeryManyArguments_Parses(t *testing.T) {
 }
 
 // ── R54: Non-standard methods to /graphql ──────────────────────────
-// OPTIONS, PUT, DELETE, PATCH should pass through without inspection.
-func TestAttack_NonStandardMethods_PassThrough(t *testing.T) {
+// OPTIONS, PUT, DELETE, PATCH should be rejected with 405 Method Not Allowed.
+// Allowing these methods through without firewall evaluation is a
+// verb-tampering bypass (CAPEC-274).
+func TestAttack_NonStandardMethods_Rejected(t *testing.T) {
 	methods := []string{http.MethodOptions, http.MethodPut, http.MethodDelete, http.MethodPatch}
 
 	for _, method := range methods {
@@ -174,8 +176,14 @@ func TestAttack_NonStandardMethods_PassThrough(t *testing.T) {
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, req)
 
-			if callCount != 1 {
-				t.Errorf("expected %s to pass through, upstream called %d times", method, callCount)
+			if callCount > 0 {
+				t.Errorf("CAPEC-274: %s to /graphql reached upstream %d times (should be blocked)", method, callCount)
+			}
+			if w.Code != http.StatusMethodNotAllowed {
+				t.Errorf("CAPEC-274: expected 405 for %s to /graphql, got %d", method, w.Code)
+			}
+			if allow := w.Header().Get("Allow"); allow != "GET, POST" {
+				t.Errorf("CAPEC-274: expected Allow: GET, POST header, got %q", allow)
 			}
 		})
 	}
