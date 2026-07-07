@@ -95,11 +95,24 @@ func New(upstreamURL string, evaluator Evaluator) (*Handler, error) {
 		return nil, fmt.Errorf("invalid upstream URL scheme %q: must be http or https", u.Scheme)
 	}
 	return &Handler{
-		upstream:     httputil.NewSingleHostReverseProxy(u),
+		upstream:     newHostFixedReverseProxy(u),
 		evaluator:    evaluator,
 		MaxBodyBytes: DefaultMaxBodyBytes,
 		ParseTimeout: DefaultParseTimeout,
 	}, nil
+}
+
+// newHostFixedReverseProxy creates a ReverseProxy that overrides the Host
+// header to match the upstream target, preventing Host header injection
+// (CAPEC-664: SSRF via Host manipulation).
+func newHostFixedReverseProxy(target *url.URL) *httputil.ReverseProxy {
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	origDirector := proxy.Director
+	proxy.Director = func(r *http.Request) {
+		origDirector(r)
+		r.Host = r.URL.Host
+	}
+	return proxy
 }
 
 // MustNew is like New but panics on error. Used in tests and bootstrap code.

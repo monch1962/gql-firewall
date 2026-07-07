@@ -33,6 +33,13 @@
 | CAPEC-383 | Harvesting Info via API Event Monitoring | 🟢 sanitizeError returns generic messages | internal/proxy/capec_round_r6_disclosure_test.go |
 | CAPEC-541 | Application Fingerprinting | 🟢 no identity-leaking headers on blocked responses | internal/proxy/capec_round_r6_disclosure_test.go |
 
+## Round 5: R5 (Protocol) + R2 (Injection)
+
+| CAPEC-ID | Name | Round | Status | Test File |
+|---|---|---|---|---|
+| CAPEC-33 | HTTP Request Smuggling | R5 | 🟢 Go HTTP server rejects CL/TE conflicts | internal/proxy/capec_round_r5_r2_smuggle_ssrf_test.go |
+| CAPEC-664 | Server Side Request Forgery | R2 | 🔴→🟢 Fixed: Host header injection | internal/proxy/capec_round_r5_r2_smuggle_ssrf_test.go |
+
 ## Batch-marked — inherently blocked (no TDD test needed)
 
 These patterns are handled by the OS/network stack, Go's standard library, or are irrelevant to an HTTP reverse proxy sidecar:
