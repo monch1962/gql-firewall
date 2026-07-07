@@ -13,6 +13,18 @@
 |---|---|---|---|
 | CAPEC-274 | HTTP Verb Tampering | ✅ | internal/proxy/capec_round_r5_verb_tamper_test.go |
 
+## Round 2: R5 — Protocol & Communication
+
+| CAPEC-ID | Name | Status | Test File |
+|---|---|---|---|
+| CAPEC-105 | HTTP Request Splitting (CRLF) | 🟢 stdlib/OS protection | internal/proxy/capec_round_r5_crlf_injection_test.go |
+
+## Round 3: R2 — Injection & Code Execution
+
+| CAPEC-ID | Name | Status | Test File |
+|---|---|---|---|
+| CAPEC-460 | HTTP Parameter Pollution (HPP) | 🟢 stdlib/OS protection | internal/proxy/capec_round_r2_hpp_test.go |
+
 ## Batch-marked — inherently blocked (no TDD test needed)
 
 These patterns are handled by the OS/network stack, Go's standard library, or are irrelevant to an HTTP reverse proxy sidecar:
