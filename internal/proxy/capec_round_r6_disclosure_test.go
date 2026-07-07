@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/monch1962/gql-firewall/internal/opa"
@@ -181,12 +182,8 @@ func TestAttack_CAPEC383_ErrorPathLeak(t *testing.T) {
 func containsInternalPath(s string) bool {
 	indicators := []string{"/internal/", "/home/", "/go/", "proxy.go", "server.go", "nil", "runtime."}
 	for _, ind := range indicators {
-		if len(s) > 0 && len(s) > len(ind) {
-			for i := 0; i <= len(s)-len(ind); i++ {
-				if s[i:i+len(ind)] == ind {
-					return true
-				}
-			}
+		if strings.Contains(s, ind) {
+			return true
 		}
 	}
 	return false
