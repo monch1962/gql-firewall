@@ -73,3 +73,6 @@ coverage.txt
 # Dependencies
 vendor/
 /go/pkg/mod/
+
+# Reports (non-project artifacts)
+reports/
