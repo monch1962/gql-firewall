@@ -2,6 +2,8 @@ module github.com/monch1962/gql-firewall
 
 go 1.25.0
 
+toolchain go1.25.12
+
 require (
 	github.com/open-policy-agent/opa v1.17.1
 	github.com/prometheus/client_golang v1.23.2
