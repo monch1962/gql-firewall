@@ -146,12 +146,12 @@ func main() {
 	}
 
 	evaluator := &compositeEvaluator{
-		opa:          opaEval,
-		opaStore:     opaStore,
-		schema:       schemaDoc,
-		cacheTTL:     *cacheTTL,
+		opa:           opaEval,
+		opaStore:      opaStore,
+		schema:        schemaDoc,
+		cacheTTL:      *cacheTTL,
 		opaFailClosed: *opaFailClosed,
-		opaAuditOnly: *opaAuditOnly,
+		opaAuditOnly:  *opaAuditOnly,
 	}
 
 	// Set up the admin API for live rule management

@@ -400,9 +400,9 @@ func TestE2E_FieldBlocklist_Blocked(t *testing.T) {
 
 	store := opa.NewDataStore()
 	store.SetParams(map[string]interface{}{
-		"depth_limit":      10.0,
-		"max_field_count":  100.0,
-		"field_blocklist":  []interface{}{"user.ssn"},
+		"depth_limit":     10.0,
+		"max_field_count": 100.0,
+		"field_blocklist": []interface{}{"user.ssn"},
 	})
 	eval := newEmbeddedEval(t, store.GetParams())
 	proxyHandler := proxy.MustNew(up.URL, &downstreamProxiedEval{eval: eval, store: store})
@@ -425,9 +425,9 @@ func TestE2E_FieldAllowlist_BlocksNonListed(t *testing.T) {
 
 	store := opa.NewDataStore()
 	store.SetParams(map[string]interface{}{
-		"depth_limit":      10.0,
-		"max_field_count":  100.0,
-		"field_allowlist":  []interface{}{"user.name"},
+		"depth_limit":     10.0,
+		"max_field_count": 100.0,
+		"field_allowlist": []interface{}{"user.name"},
 	})
 	eval := newEmbeddedEval(t, store.GetParams())
 	proxyHandler := proxy.MustNew(up.URL, &downstreamProxiedEval{eval: eval, store: store})
@@ -450,9 +450,9 @@ func TestE2E_OperationType_BlockedSubscription(t *testing.T) {
 
 	store := opa.NewDataStore()
 	store.SetParams(map[string]interface{}{
-		"depth_limit":         10.0,
-		"max_field_count":     100.0,
-		"blocked_operations":  []interface{}{"subscription"},
+		"depth_limit":        10.0,
+		"max_field_count":    100.0,
+		"blocked_operations": []interface{}{"subscription"},
 	})
 	eval := newEmbeddedEval(t, store.GetParams())
 	proxyHandler := proxy.MustNew(up.URL, &downstreamProxiedEval{eval: eval, store: store})
@@ -497,22 +497,22 @@ func TestE2E_ShallowQuery_PassesToUpstream(t *testing.T) {
 func TestE2E_MultipleAttackVectors_PipelineHolds(t *testing.T) {
 	// Use a permissive policy and verify each attack type independently
 	tests := []struct {
-		name  string
-		query string
+		name   string
+		query  string
 		params map[string]interface{}
-		want  int
+		want   int
 	}{
 		{
-			name:  "deep query blocked",
-			query: "{ a { b { c { d { e } } } } }",
+			name:   "deep query blocked",
+			query:  "{ a { b { c { d { e } } } } }",
 			params: map[string]interface{}{"depth_limit": 3.0, "max_field_count": 100.0, "cost_budget": 200.0},
-			want:  http.StatusForbidden,
+			want:   http.StatusForbidden,
 		},
 		{
-			name:  "shallow query allowed",
-			query: "{ hello }",
+			name:   "shallow query allowed",
+			query:  "{ hello }",
 			params: map[string]interface{}{"depth_limit": 10.0, "max_field_count": 100.0},
-			want:  http.StatusOK,
+			want:   http.StatusOK,
 		},
 		{
 			name:  "blocked field denied",

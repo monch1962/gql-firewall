@@ -9,9 +9,9 @@ import (
 // Used by the embedded evaluator to inject data into Rego policies.
 // For sidecar mode, these are pushed to the OPA HTTP API instead.
 type DataStore struct {
-	mu       sync.RWMutex
-	params   map[string]interface{}
-	tenants  map[string]map[string]interface{}
+	mu      sync.RWMutex
+	params  map[string]interface{}
+	tenants map[string]map[string]interface{}
 }
 
 // NewDataStore creates an empty data store.

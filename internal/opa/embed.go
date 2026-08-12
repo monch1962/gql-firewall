@@ -18,11 +18,11 @@ type EmbedConfig struct {
 
 // EmbeddedEvaluator evaluates Rego policies in-process using the OPA Go library.
 type EmbeddedEvaluator struct {
-	mu          sync.RWMutex
-	prepared    *v1.PreparedEvalQuery
+	mu           sync.RWMutex
+	prepared     *v1.PreparedEvalQuery
 	preparedDeny *v1.PreparedEvalQuery
-	store       *DataStore
-	policy      string
+	store        *DataStore
+	policy       string
 }
 
 // NewEmbedded creates an embedded Rego evaluator.

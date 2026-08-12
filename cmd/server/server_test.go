@@ -354,7 +354,7 @@ func TestAdminAPI_Unauthenticated(t *testing.T) {
 	s := adminTestServer(t, "secret", newEval())
 	defer s.Close()
 	for _, p := range []string{"/admin/rules", "/admin/tenants", "/admin/stats"} {
-		code, _ := httpGet(t, s.URL + p)
+		code, _ := httpGet(t, s.URL+p)
 		if code != 401 {
 			t.Errorf("%s: expected 401, got %d", p, code)
 		}

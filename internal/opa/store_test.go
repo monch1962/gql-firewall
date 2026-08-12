@@ -17,7 +17,7 @@ func TestNewDataStore(t *testing.T) {
 func TestSetAndGetParams(t *testing.T) {
 	s := NewDataStore()
 	s.SetParams(map[string]interface{}{
-		"depth_limit": 10,
+		"depth_limit":     10,
 		"max_field_count": 100,
 	})
 	params := s.GetParams()

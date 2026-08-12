@@ -153,10 +153,10 @@ func TestValidate_MutationFieldExists(t *testing.T) {
 	schema := buildTestSchema(sdl)
 
 	tests := []struct {
-		name      string
-		opType    string
-		paths     []string
-		wantOK    bool
+		name   string
+		opType string
+		paths  []string
+		wantOK bool
 	}{
 		{"query field on Query type", "query", []string{"ping"}, true},
 		{"mutation field on Mutation type", "mutation", []string{"createUser"}, true},

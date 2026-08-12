@@ -208,9 +208,9 @@ func TestOWASP_DirectiveDoS_HighCountBlocked(t *testing.T) {
 	e := newOWASPEval(t, defaultParams)
 	input := &Input{
 		OperationType: "query", Depth: 1, FieldCount: 1,
-		FieldPaths:  []string{"hello"},
-		Directives:  50,
-		Params:      defaultParams,
+		FieldPaths: []string{"hello"},
+		Directives: 50,
+		Params:     defaultParams,
 	}
 	assertBlocked(t, e, input, "directive count")
 }
@@ -219,9 +219,9 @@ func TestOWASP_DirectiveDoS_NormalCountPasses(t *testing.T) {
 	e := newOWASPEval(t, defaultParams)
 	input := &Input{
 		OperationType: "query", Depth: 1, FieldCount: 1,
-		FieldPaths:  []string{"hello"},
-		Directives:  3,
-		Params:      defaultParams,
+		FieldPaths: []string{"hello"},
+		Directives: 3,
+		Params:     defaultParams,
 	}
 	assertAllowed(t, e, input)
 }
@@ -389,7 +389,7 @@ func TestOWASP_NPlusOne_TooManyListsBlocked(t *testing.T) {
 	e := newOWASPEval(t, defaultParams)
 	input := &Input{
 		OperationType: "query", Depth: 2, FieldCount: 3,
-		FieldPaths:    []string{"users", "users.name"},
+		FieldPaths:     []string{"users", "users.name"},
 		ListsRequested: 20,
 		Params:         defaultParams,
 	}
@@ -400,7 +400,7 @@ func TestOWASP_NPlusOne_FewListsPasses(t *testing.T) {
 	e := newOWASPEval(t, defaultParams)
 	input := &Input{
 		OperationType: "query", Depth: 2, FieldCount: 3,
-		FieldPaths:    []string{"users", "users.name"},
+		FieldPaths:     []string{"users", "users.name"},
 		ListsRequested: 1,
 		Params:         defaultParams,
 	}
@@ -414,7 +414,7 @@ func TestOWASP_NPlusOne_FewListsPasses(t *testing.T) {
 func TestOWASP_FragmentExplosion_HighCountBlocked(t *testing.T) {
 	e := newOWASPEval(t, defaultParams)
 	input := &Input{
-		OperationType:      "query", Depth: 2, FieldCount: 3,
+		OperationType: "query", Depth: 2, FieldCount: 3,
 		FieldPaths:          []string{"user", "user.name"},
 		FragmentSpreadCount: 50,
 		Params:              defaultParams,
@@ -425,7 +425,7 @@ func TestOWASP_FragmentExplosion_HighCountBlocked(t *testing.T) {
 func TestOWASP_FragmentExplosion_LowCountPasses(t *testing.T) {
 	e := newOWASPEval(t, defaultParams)
 	input := &Input{
-		OperationType:      "query", Depth: 2, FieldCount: 3,
+		OperationType: "query", Depth: 2, FieldCount: 3,
 		FieldPaths:          []string{"user", "user.name"},
 		FragmentSpreadCount: 3,
 		Params:              defaultParams,
@@ -488,11 +488,11 @@ func TestOWASP_PersistedQuery_PersistedWithHashPasses(t *testing.T) {
 	params["require_persisted_queries"] = true
 	e := newOWASPEval(t, params)
 	input := &Input{
-		OperationType:  "query", Depth: 1, FieldCount: 1,
-		OperationName:  "GetUser",
-		FieldPaths:     []string{"hello"},
-		QueryHash:      "a1b2c3d4",
-		Params:         params,
+		OperationType: "query", Depth: 1, FieldCount: 1,
+		OperationName: "GetUser",
+		FieldPaths:    []string{"hello"},
+		QueryHash:     "a1b2c3d4",
+		Params:        params,
 	}
 	assertAllowed(t, e, input)
 }
@@ -508,9 +508,9 @@ func TestOWASP_Tenant_TighterDepthLimitEnforced(t *testing.T) {
 	}{"strict", map[string]interface{}{"depth_limit": 3.0}})
 	input := &Input{
 		OperationType: "query", Depth: 5, FieldCount: 3,
-		FieldPaths: []string{"hello"},
-		TenantID:   "strict",
-		Params:     defaultParams,
+		FieldPaths:   []string{"hello"},
+		TenantID:     "strict",
+		Params:       defaultParams,
 		TenantConfig: map[string]interface{}{"depth_limit": 3.0},
 	}
 	assertBlocked(t, e, input, "tenant depth limit")
@@ -568,9 +568,9 @@ func TestOWASP_Negative_HighDirectivesWhenParamNotSet(t *testing.T) {
 	e := newOWASPEval(t, params)
 	input := &Input{
 		OperationType: "query", Depth: 1, FieldCount: 1,
-		FieldPaths:  []string{"hello"},
-		Directives:  999,
-		Params:      params,
+		FieldPaths: []string{"hello"},
+		Directives: 999,
+		Params:     params,
 	}
 	assertAllowed(t, e, input)
 }

@@ -62,7 +62,7 @@ func TestMetricsEndpoint(t *testing.T) {
 		"gql_firewall_opa_audit_blocks_total",
 	}
 	for _, name := range checks {
-			if !strings.Contains(body, name) {
+		if !strings.Contains(body, name) {
 			t.Errorf("expected metric %q in response", name)
 		}
 	}

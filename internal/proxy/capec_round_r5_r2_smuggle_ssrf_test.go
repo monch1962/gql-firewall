@@ -79,7 +79,7 @@ func TestAttack_CAPEC33_TE_Obfuscated(t *testing.T) {
 	body := `{"query":"{hello}"}`
 	req := httptest.NewRequest("POST", "/graphql", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Transfer-Encoding", "xchunked")  // Non-standard
+	req.Header.Set("Transfer-Encoding", "xchunked") // Non-standard
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -110,7 +110,7 @@ func TestAttack_CAPEC664_HostHeaderInjection(t *testing.T) {
 	body := bytes.NewReader(mustJSON(graphQLBody{Query: "{hello}"}))
 	req := httptest.NewRequest("POST", "/graphql", body)
 	req.Header.Set("Content-Type", "application/json")
-	req.Host = "evil-internal-server:8080"  // SSRF attempt
+	req.Host = "evil-internal-server:8080" // SSRF attempt
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
