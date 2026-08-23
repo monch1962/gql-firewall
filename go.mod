@@ -2,7 +2,7 @@ module github.com/monch1962/gql-firewall
 
 go 1.25.0
 
-toolchain go1.25.12
+toolchain go1.25.13
 
 require (
 	github.com/open-policy-agent/opa v1.17.1
