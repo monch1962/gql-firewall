@@ -12,9 +12,9 @@ A **GraphQL firewall sidecar** that intercepts, inspects, and secures GraphQL re
 
 ## Attack Coverage
 
-gql-firewall's OPA Rego policies (45 tests) cover 12 attack categories, with 116 additional red-team attack simulation tests at the HTTP transport layer:
+gql-firewall's OPA Rego policies (49 tests) cover 13 attack categories, with 127 additional red-team attack simulation tests at the HTTP transport layer:
 
-### OPA Policy Coverage (12 categories)
+### OPA Policy Coverage (13 categories)
 
 | # | Attack Vector | Detection | Status |
 |---|---|---|---|
@@ -30,8 +30,9 @@ gql-firewall's OPA Rego policies (45 tests) cover 12 attack categories, with 116
 | 10 | **Fragment Explosion** — `... on Type` across many unions | `max_fragment_spreads: 15` | ✅ |
 | 11 | **Query Cost** — Cheap-to-parse, expensive-to-execute queries | `depth × field_count ≤ 50` budget | ✅ |
 | 12 | **Persisted Query Bypass** — Dynamic queries in PQ-only mode | `require_persisted_queries` + hash validation | ✅ |
+| 13 | **Tenant Identity Spoofing** — forged tenant ID selects a policy set | Unregistered tenants refused; `require_verified_tenant` assurance gate | ✅ |
 
-### Red-Team Verified Transport Protection (116 attack simulation tests)
+### Red-Team Verified Transport Protection (127 attack simulation tests)
 
 All verified with TDD — tests written first, then defenses implemented.
 
@@ -126,6 +127,7 @@ All verified with TDD — tests written first, then defenses implemented.
 | **R92** | **Unbounded batch size** | `--max-batch-size` (default 100) | ✅ |
 | **R93** | **Unbounded parse concurrency** | Bounded parse pool, `503` when saturated | ✅ |
 | **R94** | **OPA outage disables every rule** | `--opa-fail-closed` now defaults to `true` | ✅ |
+| **R95** | **Unverified tenant identity** (`X-API-Key` prefix) | Identity source labelled; unregistered tenants refused; `require_verified_tenant` policy knob | ✅ |
 
 ## CLI Flags
 
@@ -153,6 +155,9 @@ All verified with TDD — tests written first, then defenses implemented.
 | `--max-batch-size` | `100` | Maximum queries accepted in one batch request |
 | `--max-concurrent-parses` | `64` | Maximum concurrent query parses (≤ 0 disables the cap) |
 | `--allowed-operation-names` | `""` | Comma-separated list of allowed operation names<br>(blocks unnamed + unlisted when non-empty) |
+| `--tenant-mode` | `header` | Tenant identity mode (`header` = unverified; verified modes planned) |
+| `--unknown-tenant` | `deny` | Reject unregistered tenant IDs (`deny` applies only when tenants are registered) |
+| `--opa-cache-max-entries` | `10000` | Maximum cached OPA decisions (0 = default, negative = unlimited) |
 
 ### Upgrade notes (0.5.0)
 
@@ -170,6 +175,23 @@ behaviour change; the previous behaviour remains available via the noted flag.
 - **Batches above `--max-batch-size` (100) are rejected**, and more than
   `--max-concurrent-parses` (64) simultaneous parses return `503`.
 
+### Upgrade notes (0.5.1)
+
+- **Unregistered tenants are now rejected** whenever at least one tenant is
+  registered (`--unknown-tenant=deny`, the default). A request presenting an
+  unknown `X-API-Key` tenant previously fell through to the global parameter
+  set; it now returns `403`. Set `--unknown-tenant=allow` to restore the old
+  behaviour. Deployments that register no tenants are unaffected.
+- **Tenant identity source reaches policy.** OPA input now carries
+  `tenant_identity_source` and `tenant_known`. Existing policies are unaffected
+  unless they set `require_verified_tenant`.
+- **The decision cache is bounded** by `--opa-cache-max-entries` (default
+  10 000). Use a negative value for the previous unbounded behaviour.
+- **This release does not yet verify tenant identity.** `header` mode is an
+  assertion for deployments behind an authenticating gateway; requesting an
+  unimplemented verified mode fails at startup. Verified modes (`hmac`, `jwt`,
+  `mtls`) are planned for 0.6.0.
+
 ### Security Features
 
 | Feature | Flag / Config | What it prevents |
@@ -185,7 +207,7 @@ behaviour change; the previous behaviour remains available via the noted flag.
 | **Rate-limiter memory cap** | Built-in (`MaxKeys`) | Bucket-map exhaustion |
 | **Admin bind guard** | `--admin` (loopback) / `--admin-token` | Unauthenticated rule rewrite |
 | **Server timeouts** | Built-in | Slow loris / connection exhaustion (H-7) |
-| **Tenant key validation** | Via API | Tenant impersonation (H-2) |
+| **Tenant identity source** | `--tenant-mode`, `--unknown-tenant` | Unverified identity is labelled; unregistered tenants are refused |
 | **Sanitized errors** | Built-in | Information disclosure (H-4) |
 | **Improved cache key** | Built-in | OPA cache poisoning (H-3) |
 | **Metrics isolation** | `--metrics-listen` | Traffic pattern leakage (M-4) |
@@ -196,12 +218,52 @@ behaviour change; the previous behaviour remains available via the noted flag.
 || **Upstream URL validation** | Built-in | Scheme injection / SSRF (H4) |
 || **Operation name allowlist** | `--allowed-operation-names` | Anonymous/unlisted operation probing |
 
+### Tenant identity model
+
+A tenant ID selects which policy configuration (`tenant_config`) applies, so the
+firewall is explicit about whether that identity is **proven** or merely
+**asserted**.
+
+| Mode | Trust | Use when |
+|---|---|---|
+| `header` (default) | Asserted — parsed from `X-API-Key`, not verified | A trusted gateway authenticates the caller and strips inbound `X-API-Key` |
+| `hmac` / `jwt` / `mtls` | Verified | Planned for 0.6.0; requesting an unavailable mode fails at startup |
+
+Rules of the model:
+
+- **Unregistered tenants are refused** (`--unknown-tenant=deny`, the default)
+  once any tenant is registered. Previously a typo or a forged ID silently fell
+  through to the global parameter set, letting a client choose which
+  configuration set measured its request. Deployments with no registered
+  tenants are unaffected; `--unknown-tenant=allow` restores the old behaviour.
+- **Anonymous is not "unknown".** A request that presents no tenant identity is
+  evaluated against the global parameters.
+- **Policies can gate on assurance level.** OPA input carries
+  `tenant_identity_source` (`header`/`hmac`/`jwt`/`mtls`) and `tenant_known`, so
+  a deployment can refuse asserted identities:
+
+  ```rego
+  deny contains msg if {
+      input.params.require_verified_tenant == true
+      input.tenant_id != ""
+      input.tenant_identity_source != "hmac"
+      msg := sprintf("tenant identity source %q is unverified", [input.tenant_identity_source])
+  }
+  ```
+
+- **Provenance is observable.** `gql_firewall_tenant_identity_total{source,result}`
+  counts resolutions and `gql_firewall_requests_blocked_total{reason="unknown_tenant"}`
+  counts refused claims — alert on a spike to catch probing or misconfiguration.
+- **Decisions are cached per identity.** The decision cache is bounded
+  (`--opa-cache-max-entries`) and keyed on tenant *and* identity source, so a
+  verdict can never be replayed for a different caller or assurance level.
+
 ### Core
 - **GraphQL query parsing** — Parses queries, mutations, and subscriptions using `gqlparser/v2`. Extracts operation type, name, depth, field count, and full field paths.
 - **OPA/Rego policy engine** — All firewall rules are expressed as Rego policies. Supports two deployment modes:
   - **Sidecar mode** (`--opa`): Evaluate policies via an OPA sidecar HTTP endpoint. Best for scale-out deployments.
   - **Embedded mode** (`--opa-embed`): Evaluate policies in-process using the OPA Go library. Zero external dependencies, ~10µs evaluation time.
-- **12 attack categories covered** — See table above. All OWASP GraphQL Top 10 + 2 additional vectors.
+- **13 attack categories covered** — See table above. All OWASP GraphQL Top 10 + 3 additional vectors.
 - **Configurable via OPA data injection** — Parameters (depth_limit, max_field_count, field_blocklist, etc.) are injected as OPA data. Update at runtime via admin API.
 - **SDL schema-aware validation** — Accept a GraphQL schema file (`--schema`). Validates requested fields exist on Query type before forwarding.
 - **Live admin API** — View and update rules at runtime via REST API on `:8082`.
@@ -470,14 +532,15 @@ gql-firewall/
 ├── internal/
 │   ├── parser/                    # GraphQL query analysis (45 tests, including Rust compat)
 │   ├── opa/                       # OPA evaluator: sidecar, embedded, data store, input builder (63 tests)
-│   ├── metrics/                   # Prometheus instrumentation (6 tests)
-│   ├── proxy/                     # HTTP reverse proxy (149 tests, incl. rounds 1–8)
+│   ├── metrics/                   # Prometheus instrumentation (11 tests)
+│   ├── proxy/                     # HTTP reverse proxy (152 tests, incl. rounds 1–9)
+│   ├── tenant/                    # Tenant identity resolvers (5 tests; verified modes planned)
 │   ├── ratelimit/                 # Token-bucket rate limiter (7 tests)
 │   ├── testutil/                  # Shared test helpers  
 │   └── integration/               # End-to-end pipeline tests (20 tests, including e2e HTTP tests)
-├── opa-policies/                  # OPA Rego policy templates (45 tests)
-│   ├── graphql.rego              # 12 attack categories, parameterized via input.params
-│   └── graphql_test.rego         # 45 policy tests
+├── opa-policies/                  # OPA Rego policy templates (49 tests)
+│   ├── graphql.rego              # 13 attack categories, parameterized via input.params
+│   └── graphql_test.rego         # 49 policy tests
 ├── README.md
 ├── go.mod / go.sum
 └── .gitignore
@@ -486,10 +549,10 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           387 test functions (459 including subtests)
-              server(38), parser(101), proxy(149), integration(20), opa(61), metrics(11), ratelimit(7)
-OPA/Rego:     45 tests   — 12 attack categories, edge cases, combined rules, operation-name allowlist
-Total:        432 test functions (504 including subtests) — all passing
+Go:           405 test functions (477 including subtests)
+              server(46), tenant(5), parser(101), proxy(152), integration(20), opa(63), metrics(11), ratelimit(7)
+OPA/Rego:     49 tests   — 13 attack categories, edge cases, combined rules, tenant assurance
+Total:        454 test functions (526 including subtests) — all passing
 ```
 
 ```bash

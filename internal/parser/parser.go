@@ -21,6 +21,7 @@ type QueryInfo struct {
 	FieldCount               int             `json:"field_count"`
 	FieldPaths               []string        `json:"field_paths"`
 	TenantID                 string          `json:"tenant_id,omitempty"`
+	TenantIdentitySource     string          `json:"tenant_identity_source,omitempty"`
 	Directives               int             `json:"directives,omitempty"`
 	BatchSize                int             `json:"batch_size,omitempty"`
 	ArgumentDepth            int             `json:"argument_depth,omitempty"`

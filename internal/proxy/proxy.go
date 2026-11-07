@@ -20,6 +20,7 @@ import (
 	"github.com/monch1962/gql-firewall/internal/metrics"
 	"github.com/monch1962/gql-firewall/internal/opa"
 	"github.com/monch1962/gql-firewall/internal/parser"
+	"github.com/monch1962/gql-firewall/internal/tenant"
 )
 
 // DefaultMaxBodyBytes is the maximum request body size (1MB).
@@ -89,11 +90,11 @@ type Handler struct {
 	upstream             *httputil.ReverseProxy
 	evaluator            Evaluator
 	MaxBodyBytes         int64
-	MaxCacheSize         int
-	MaxBatchSize         int           // 0 = DefaultMaxBatchSize
+	MaxBatchSize         int // 0 = DefaultMaxBatchSize
 	ParseTimeout         time.Duration
-	parseSem             chan struct{} // bounded parse concurrency
-	disablePanicRecovery bool          // for testing
+	TenantResolver       tenant.Resolver // nil = HeaderResolver (unverified)
+	parseSem             chan struct{}   // bounded parse concurrency
+	disablePanicRecovery bool            // for testing
 }
 
 // New creates a new proxy handler that forwards to upstreamURL after
@@ -208,17 +209,33 @@ func (h *Handler) maxBatchSize() int {
 	return DefaultMaxBatchSize
 }
 
-// applyTenant records the tenant identity derived from the API key header.
-func applyTenant(r *http.Request, info *parser.QueryInfo) {
-	info.TenantID = tenantFromRequest(r)
+// applyTenant records the resolved tenant identity on the query info.
+func (h *Handler) applyTenant(r *http.Request, info *parser.QueryInfo) {
+	id := h.resolveIdentity(r)
+	info.TenantID = id.TenantID
+	info.TenantIdentitySource = string(id.Source)
 }
 
-// tenantFromRequest derives the tenant ID from the API key header, or "".
-func tenantFromRequest(r *http.Request) string {
-	if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
-		return extractTenantID(apiKey)
+// resolveIdentity establishes tenant identity and records how it was
+// established, so operators can see how much traffic is unverified and alert on
+// a spike in unregistered claims.
+func (h *Handler) resolveIdentity(r *http.Request) tenant.Identity {
+	id := h.resolver().Resolve(r)
+	result := "absent"
+	if id.TenantID != "" {
+		result = "present"
 	}
-	return ""
+	metrics.RecordTenantIdentity(string(id.Source), result)
+	return id
+}
+
+// resolver returns the configured tenant resolver, defaulting to the
+// unverified header resolver.
+func (h *Handler) resolver() tenant.Resolver {
+	if h.TenantResolver != nil {
+		return h.TenantResolver
+	}
+	return tenant.HeaderResolver{}
 }
 
 // SetParseConcurrency resizes the parse worker pool. A value <= 0 disables the
@@ -401,7 +418,7 @@ func (h *Handler) handleGraphQLBatch(w http.ResponseWriter, r *http.Request, bod
 
 	// Tenant identity must apply to every item, exactly as it does to a single
 	// request: otherwise the array envelope sidesteps all per-tenant rules.
-	tenant := tenantFromRequest(r)
+	ident := h.resolveIdentity(r)
 
 	// Evaluate each query in the batch
 	firstOpType := "unknown"
@@ -421,7 +438,8 @@ func (h *Handler) handleGraphQLBatch(w http.ResponseWriter, r *http.Request, bod
 			metrics.RecordRequest("error", "unknown", time.Since(start))
 			return
 		}
-		queryInfo.TenantID = tenant
+		queryInfo.TenantID = ident.TenantID
+		queryInfo.TenantIdentitySource = string(ident.Source)
 		if len(req.Variables) > 0 {
 			queryInfo.RequestVariables = req.Variables
 		}
@@ -458,8 +476,8 @@ func (h *Handler) handleGraphQLBatch(w http.ResponseWriter, r *http.Request, bod
 
 // evaluateAndForward evaluates a single query and forwards it upstream if allowed.
 func (h *Handler) evaluateAndForward(w http.ResponseWriter, r *http.Request, bodyBytes []byte, queryInfo *parser.QueryInfo, start time.Time) {
-	// Extract tenant from X-API-Key header
-	applyTenant(r, queryInfo)
+	// Establish tenant identity from the configured resolver.
+	h.applyTenant(r, queryInfo)
 
 	metrics.RecordRuleEval(fmt.Sprintf("op_%s", queryInfo.OperationType))
 
@@ -515,26 +533,4 @@ func parseQueryWithTimeout(query string, timeout time.Duration) (*parser.QueryIn
 func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
-}
-
-// extractTenantID extracts a tenant identifier from an API key header.
-func extractTenantID(apiKey string) string {
-	if apiKey == "" {
-		return ""
-	}
-	for i := len(apiKey) - 1; i >= 0; i-- {
-		if apiKey[i] == '_' && hasLeadingContent(apiKey[:i]) && i < len(apiKey)-1 {
-			return apiKey[:i]
-		}
-	}
-	return apiKey
-}
-
-func hasLeadingContent(s string) bool {
-	for i := range len(s) {
-		if s[i] != '_' && s[i] != ' ' {
-			return true
-		}
-	}
-	return false
 }

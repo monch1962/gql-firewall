@@ -60,6 +60,12 @@ var (
 		Name: "gql_firewall_opa_audit_blocks_total",
 		Help: "Total number of requests OPA would have blocked (audit-only mode), by reason",
 	}, []string{"reason"})
+
+	// TenantIdentity counts tenant identity resolutions by trust source.
+	TenantIdentity = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gql_firewall_tenant_identity_total",
+		Help: "Tenant identity resolutions, by trust source and result (present/absent)",
+	}, []string{"source", "result"})
 )
 
 // ReasonLabel maps a rule reason to a bounded label value. Rule reasons can
@@ -85,6 +91,8 @@ func ReasonLabel(reason string) string {
 		return "persisted_query"
 	case strings.Contains(reason, "OPA unavailable"):
 		return "opa_unavailable"
+	case strings.Contains(reason, "unknown tenant"):
+		return "unknown_tenant"
 	case strings.Contains(reason, "tenant"):
 		return "tenant_policy"
 	case strings.Contains(reason, "depth"):
@@ -140,6 +148,11 @@ func RecordOPA(outcome string) {
 // RecordOPAAuditBlock records a request that OPA would have blocked in audit-only mode.
 func RecordOPAAuditBlock(reason string) {
 	OPAAuditBlocks.WithLabelValues(ReasonLabel(reason)).Inc()
+}
+
+// RecordTenantIdentity records how a request's tenant identity was established.
+func RecordTenantIdentity(source, result string) {
+	TenantIdentity.WithLabelValues(source, result).Inc()
 }
 
 // Handler returns an HTTP handler for the /metrics endpoint.

@@ -300,3 +300,22 @@ deny contains msg if {
     input.operation_type == blocked
     msg := sprintf("operation type %q is blocked by tenant policy", [input.operation_type])
 }
+
+# =============================================================================
+# ATTACK 13: Tenant Identity Assurance (CAPEC-21 — trusted identifiers)
+# =============================================================================
+# A tenant identity parsed from a client header is asserted, not proven, so a
+# deployment can refuse it. Modes that verify identity cryptographically (hmac,
+# jwt, mtls) are reported via input.tenant_identity_source.
+# Parameter: input.params.require_verified_tenant (boolean)
+# Anonymous requests are governed by the global parameter set and are not
+# affected by this rule.
+
+deny contains msg if {
+    input.params.require_verified_tenant == true
+    input.tenant_id != ""
+    input.tenant_identity_source != "hmac"
+    input.tenant_identity_source != "jwt"
+    input.tenant_identity_source != "mtls"
+    msg := sprintf("tenant identity source %q is unverified but this deployment requires verified identity", [input.tenant_identity_source])
+}

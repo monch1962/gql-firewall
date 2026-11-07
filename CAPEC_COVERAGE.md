@@ -464,3 +464,22 @@ recorded for traceability.
 **Result:** 13 vectors, 15 TDD test functions (14 attack + 1 amplifier guard),
 all RED→GREEN. Two pre-existing tests — R58 (oversized batch) and R77
 (`/graphql/` path) — asserted the vulnerable behaviour and were corrected.
+
+## Round 9 (Phase 1): Tenant Identity Assurance
+
+CAPEC-21 — *Exploitation of Trusted Identifiers*. The tenant ID was the prefix
+of a client-supplied `X-API-Key` with no verification, and an unregistered
+tenant silently fell through to the global parameter set, so a client chose
+which configuration set measured its request.
+
+| ID | Vector | Class | Control | Test file |
+|---|---|---|---|---|
+| R95 | Unverified tenant identity selects a policy set | Trusted-identifier exploitation | Identity provenance (`tenant_identity_source`) exported to policy; unregistered tenants refused once any tenant is registered; `require_verified_tenant` assurance gate; per-identity, bounded decision cache | internal/tenant/tenant_test.go, internal/proxy/attack_round9_test.go, cmd/server/attack_round9_test.go, internal/opa/tenant_identity_test.go, opa-policies/graphql_test.rego |
+
+**Scope note:** this round makes the trust boundary explicit and closes the
+silent fall-through. It does not yet *verify* identity — `header` mode is an
+assertion for deployments behind an authenticating gateway, and requesting an
+unimplemented verified mode fails at startup. Cryptographic modes (HMAC signed
+keys, JWT/JWKS, mTLS) are Phase 2 work behind the same `tenant.Resolver`
+interface, with the rejection of unverified identities already enforceable via
+`require_verified_tenant`.

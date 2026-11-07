@@ -14,6 +14,8 @@ type Input struct {
 	FieldCount               int                    `json:"field_count"`
 	FieldPaths               []string               `json:"field_paths"`
 	TenantID                 string                 `json:"tenant_id,omitempty"`
+	TenantIdentitySource     string                 `json:"tenant_identity_source,omitempty"`
+	TenantKnown              bool                   `json:"tenant_known,omitempty"`
 	Directives               int                    `json:"directives,omitempty"`
 	BatchSize                int                    `json:"batch_size,omitempty"`
 	ArgumentDepth            int                    `json:"argument_depth,omitempty"`
@@ -64,8 +66,12 @@ func BuildInput(info *parser.QueryInfo, store *DataStore) *Input {
 	if store != nil {
 		input.Params = store.GetParams()
 		if info.TenantID != "" {
-			input.TenantConfig = store.GetTenant(info.TenantID)
+			if cfg := store.GetTenant(info.TenantID); cfg != nil {
+				input.TenantConfig = cfg
+				input.TenantKnown = true
+			}
 		}
 	}
+	input.TenantIdentitySource = info.TenantIdentitySource
 	return input
 }

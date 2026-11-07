@@ -255,12 +255,15 @@ func TestEval_TenantOverridesDefault(t *testing.T) {
 	assertBlock(t, r, err, "depth")
 }
 
+// A request that presents no tenant identity is anonymous and is evaluated
+// against the global parameter set. A claimed-but-unregistered tenant is
+// rejected instead — see TestAttack_UnregisteredTenantDenied (round 9).
 func TestEval_NonTenantGetsDefault(t *testing.T) {
 	e := newEval(
 		withParams("depth_limit", 10.0),
 		withTenantParams("strict", map[string]interface{}{"depth_limit": 1.0}),
 	)
-	r, err := e.Evaluate(qi(tenantID("other"), depth(5)))
+	r, err := e.Evaluate(qi(depth(5)))
 	assertAllow(t, r, err)
 }
 
@@ -337,7 +340,7 @@ func TestEval_OPAAuditOnlyWithCache(t *testing.T) {
 
 func adminTestServer(t *testing.T, token string, eval *compositeEvaluator) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(adminMux(token, eval, eval.opa, eval.opaStore))
+	return httptest.NewServer(adminMux(token, eval, eval.opa, eval.opaStore, "header"))
 }
 
 func TestAdminAPI_HealthCheck(t *testing.T) {

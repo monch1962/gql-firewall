@@ -25,9 +25,10 @@ import (
 	"github.com/monch1962/gql-firewall/internal/parser"
 	"github.com/monch1962/gql-firewall/internal/proxy"
 	"github.com/monch1962/gql-firewall/internal/ratelimit"
+	"github.com/monch1962/gql-firewall/internal/tenant"
 )
 
-const version = "0.5.0"
+const version = "0.5.1"
 
 // defaultOPAFailClosed selects the behaviour when the policy engine cannot be
 // reached: closed (block) is the secure default. Failing open means an
@@ -82,6 +83,9 @@ func main() {
 		rateBurst       = flag.Int("rate-burst", 0, "Rate limit burst size (0 = 2x rate-limit)")
 		trustProxy      = flag.Bool("trust-proxy-headers", false, "Honour X-Forwarded-For for rate limiting (only behind a trusted proxy)")
 		allowedOpNames  = flag.String("allowed-operation-names", "", "Comma-separated list of allowed operation names (empty = allow all)")
+		tenantMode      = flag.String("tenant-mode", "header", "Tenant identity mode (header = unverified, for trusted gateways)")
+		unknownTenant   = flag.String("unknown-tenant", "deny", "Unregistered tenant IDs: deny|allow (deny applies only when tenants are registered)")
+		cacheMaxEntries = flag.Int("opa-cache-max-entries", defaultDecisionCacheEntries, "Maximum cached OPA decisions (0 = default, negative = unlimited)")
 	)
 	flag.Parse()
 
@@ -121,6 +125,16 @@ func main() {
 
 	if err := validateAdminBind(*adminListenAddr, *adminToken); err != nil {
 		log.Fatal(err)
+	}
+
+	resolver, err := tenant.ResolverFor(*tenantMode)
+	if err != nil {
+		log.Fatal(err)
+	}
+	switch *unknownTenant {
+	case "deny", "allow":
+	default:
+		log.Fatalf("--unknown-tenant must be deny or allow, got %q", *unknownTenant)
 	}
 
 	// Load SDL schema for schema-aware validation
@@ -187,17 +201,19 @@ func main() {
 	}
 
 	evaluator := &compositeEvaluator{
-		opa:           opaEval,
-		opaStore:      opaStore,
-		schema:        schemaDoc,
-		cacheTTL:      *cacheTTL,
-		opaFailClosed: *opaFailClosed,
-		opaAuditOnly:  *opaAuditOnly,
+		opa:                 opaEval,
+		opaStore:            opaStore,
+		schema:              schemaDoc,
+		cacheTTL:            *cacheTTL,
+		maxCacheSize:        *cacheMaxEntries,
+		opaFailClosed:       *opaFailClosed,
+		opaAuditOnly:        *opaAuditOnly,
+		allowUnknownTenants: *unknownTenant == "allow",
 	}
 
 	// Set up the admin API for live rule management
 	if *adminListenAddr != "" {
-		startAdminAPI(*adminListenAddr, *adminToken, evaluator, opaEval, opaStore)
+		startAdminAPI(*adminListenAddr, *adminToken, evaluator, opaEval, opaStore, *tenantMode)
 	}
 
 	// Create the proxy handler with body size limit (H-6 fix)
@@ -209,6 +225,14 @@ func main() {
 	handler.MaxBodyBytes = *maxBodyMB * 1024 * 1024
 	handler.MaxBatchSize = *maxBatchSize
 	handler.SetParseConcurrency(*maxConcurrent)
+	handler.TenantResolver = resolver
+
+	// Make the trust assumption audible: header mode is an assertion, not a
+	// proof, and only acceptable when a trusted gateway has authenticated the
+	// caller and stripped inbound X-API-Key headers.
+	if *tenantMode == "header" && *adminListenAddr != "" {
+		slog.Warn("tenant identity is unverified (mode=header): authenticate at the edge or use a verified tenant mode for multi-tenant deployments")
+	}
 
 	// Rate limiter (optional)
 	var rateLimitHandler http.Handler = handler
@@ -369,7 +393,7 @@ func requireAdminAuth(expectedToken string, next http.HandlerFunc) http.HandlerF
 }
 
 // adminMux creates the admin API HTTP mux with all handlers configured.
-func adminMux(token string, eval *compositeEvaluator, opaEval opa.Evaluator, store *opa.DataStore) *http.ServeMux {
+func adminMux(token string, eval *compositeEvaluator, opaEval opa.Evaluator, store *opa.DataStore, tenantMode string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/admin/rules", requireAdminAuth(token, func(w http.ResponseWriter, r *http.Request) {
@@ -430,6 +454,10 @@ func adminMux(token string, eval *compositeEvaluator, opaEval opa.Evaluator, sto
 			}
 			store.SetTenant(tenantID, cfg)
 			metrics.ActiveTenants.Set(float64(store.CountTenants()))
+			if tenantMode == "header" {
+				slog.Warn("tenant registered but tenant identity is unverified",
+					"tenant", tenantID, "mode", tenantMode)
+			}
 			log.Printf("admin API: tenant %q rules updated", tenantID)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -465,8 +493,8 @@ func adminMux(token string, eval *compositeEvaluator, opaEval opa.Evaluator, sto
 }
 
 // startAdminAPI starts the admin HTTP server for live rule management.
-func startAdminAPI(addr, token string, eval *compositeEvaluator, opaEval opa.Evaluator, store *opa.DataStore) {
-	mux := adminMux(token, eval, opaEval, store)
+func startAdminAPI(addr, token string, eval *compositeEvaluator, opaEval opa.Evaluator, store *opa.DataStore, tenantMode string) {
+	mux := adminMux(token, eval, opaEval, store, tenantMode)
 	adminServer := &http.Server{
 		Addr:              addr,
 		Handler:           mux,
@@ -493,8 +521,14 @@ type compositeEvaluator struct {
 	schema        *parser.SchemaInfo
 	cacheTTL      time.Duration
 	cache         map[string]cachedDecision
+	lastSweep     time.Time
+	maxCacheSize  int
 	opaFailClosed bool
 	opaAuditOnly  bool
+
+	// allowUnknownTenants permits a claimed-but-unregistered tenant ID. The
+	// zero value denies such claims once any tenant is registered.
+	allowUnknownTenants bool
 }
 
 type cachedDecision struct {
@@ -511,7 +545,21 @@ func (c *compositeEvaluator) Evaluate(info *parser.QueryInfo) (*opa.Result, erro
 	opaFailClosed := c.opaFailClosed
 	opaAuditOnly := c.opaAuditOnly
 	store := c.opaStore
+	allowUnknown := c.allowUnknownTenants
 	c.mu.RUnlock()
+
+	// 0. Tenant identity. Once any tenant is registered, a claimed-but-unknown
+	// tenant ID is refused: otherwise a client chooses which configuration set
+	// its request is measured against (CAPEC-21, trusted identifiers).
+	if reason, blocked := unregisteredTenant(info, store, allowUnknown); blocked {
+		metrics.RecordBlock(reason)
+		slog.Warn("rejected unregistered tenant",
+			"tenant", info.TenantID,
+			"source", info.TenantIdentitySource,
+			"operation", info.OperationType,
+		)
+		return &opa.Result{Allowed: false, Reason: reason}, nil
+	}
 
 	// 1. Schema-aware validation
 	if schema != nil {
@@ -563,23 +611,72 @@ func (c *compositeEvaluator) Evaluate(info *parser.QueryInfo) (*opa.Result, erro
 	}
 
 	if cacheTTL > 0 {
-		c.mu.Lock()
-		if c.cache == nil {
-			c.cache = make(map[string]cachedDecision)
-		}
-		c.cache[cacheKey] = cachedDecision{result: result, expiry: time.Now().Add(cacheTTL)}
-		c.mu.Unlock()
+		c.storeDecision(cacheKey, result, cacheTTL)
 	}
 
 	return result, nil
 }
 
+// defaultDecisionCacheEntries bounds the decision cache when no explicit limit
+// is configured.
+const defaultDecisionCacheEntries = 10_000
+
+// storeDecision caches a decision while keeping the cache bounded. Tenant
+// identity is attacker-influenced and part of the cache key, so an unbounded
+// map would turn identity spoofing into unbounded memory growth. When the limit
+// is reached, expired entries are reclaimed (at most once a second) and, if the
+// cache is still full, the decision is simply not cached.
+func (c *compositeEvaluator) storeDecision(key string, result *opa.Result, ttl time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.cache == nil {
+		c.cache = make(map[string]cachedDecision)
+	}
+
+	max := c.maxCacheSize
+	if max == 0 {
+		max = defaultDecisionCacheEntries
+	}
+	if max > 0 && len(c.cache) >= max {
+		now := time.Now()
+		if now.Sub(c.lastSweep) >= time.Second {
+			for k, v := range c.cache {
+				if !now.Before(v.expiry) {
+					delete(c.cache, k)
+				}
+			}
+			c.lastSweep = now
+		}
+		if len(c.cache) >= max {
+			return
+		}
+	}
+
+	c.cache[key] = cachedDecision{result: result, expiry: time.Now().Add(ttl)}
+}
+
+// unregisteredTenant reports whether a claimed tenant identity should be
+// refused. It applies only when tenants are registered (so single-tenant
+// deployments are unaffected) and never to anonymous requests.
+func unregisteredTenant(info *parser.QueryInfo, store *opa.DataStore, allowUnknown bool) (string, bool) {
+	if allowUnknown || info.TenantID == "" || store == nil || store.CountTenants() == 0 {
+		return "", false
+	}
+	if store.GetTenant(info.TenantID) != nil {
+		return "", false
+	}
+	// Deliberately does not echo the claimed identifier: a client that sends a
+	// raw secret in this header must not have it reflected back in the response.
+	return "unknown tenant is not registered", true
+}
+
 // decisionCacheKey builds a cache key from everything that can change a
-// decision: operation type and name, tenant identity, request variables, depth,
-// field count and the exact field paths. Field paths are length-prefixed so
-// distinct path sets cannot encode identically (["x.y","z"] vs ["x.yz"]), and
-// the tenant and variables are included so one caller's cached decision can
-// never be replayed for another.
+// decision: operation type and name, tenant identity and its trust source,
+// request variables, depth, field count and the exact field paths. Field paths
+// are length-prefixed so distinct path sets cannot encode identically
+// (["x.y","z"] vs ["x.yz"]), and the tenant plus variables are included so one
+// caller's cached decision can never be replayed for another.
 func decisionCacheKey(info *parser.QueryInfo) string {
 	h := sha256.New()
 	write := func(parts ...string) {
@@ -587,7 +684,7 @@ func decisionCacheKey(info *parser.QueryInfo) string {
 			fmt.Fprintf(h, "%d:%s|", len(s), s)
 		}
 	}
-	write(info.OperationType, info.OperationName, info.TenantID, info.QueryHash)
+	write(info.OperationType, info.OperationName, info.TenantID, info.TenantIdentitySource, info.QueryHash)
 	write(strconv.Itoa(info.Depth), strconv.Itoa(info.FieldCount))
 	write(string(info.RequestVariables))
 	for _, p := range info.FieldPaths {

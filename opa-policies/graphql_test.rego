@@ -443,3 +443,45 @@ test_allowlist_inactive_allows_unnamed if {
         "params": {"depth_limit": 10}
     }
 }
+
+# ===========================================================================
+# R95: Tenant identity assurance
+# An unverified (asserted) tenant identity may be refused per deployment.
+# ===========================================================================
+test_unverified_tenant_denied_when_required if {
+    some msg in deny with input as {
+        "depth": 1, "field_count": 1, "operation_type": "query",
+        "field_paths": ["hello"], "tenant_id": "acme",
+        "tenant_identity_source": "header",
+        "params": {"require_verified_tenant": true}
+    }
+    contains(msg, "unverified")
+}
+
+test_verified_tenant_allowed_when_required if {
+    allow with input as {
+        "depth": 1, "field_count": 1, "operation_type": "query",
+        "field_paths": ["hello"], "tenant_id": "acme",
+        "tenant_identity_source": "hmac",
+        "params": {"require_verified_tenant": true}
+    }
+}
+
+test_unverified_tenant_allowed_by_default if {
+    allow with input as {
+        "depth": 1, "field_count": 1, "operation_type": "query",
+        "field_paths": ["hello"], "tenant_id": "acme",
+        "tenant_identity_source": "header",
+        "params": {}
+    }
+}
+
+# Anonymous traffic is governed by the global parameter set, not by the
+# tenant-assurance knob.
+test_anonymous_allowed_when_verified_required if {
+    allow with input as {
+        "depth": 1, "field_count": 1, "operation_type": "query",
+        "field_paths": ["hello"],
+        "params": {"require_verified_tenant": true}
+    }
+}

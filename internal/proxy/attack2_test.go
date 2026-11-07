@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/monch1962/gql-firewall/internal/opa"
+	"github.com/monch1962/gql-firewall/internal/tenant"
 )
 
 // R15: Tenant ID extraction edge cases
@@ -22,9 +23,9 @@ func TestAttack_TenantIDFringeCases(t *testing.T) {
 		{"", ""},
 	}
 	for _, tt := range tests {
-		got := extractTenantID(tt.key)
+		got := tenant.ExtractTenantID(tt.key)
 		if got != tt.want {
-			t.Errorf("extractTenantID(%q) = %q, want %q", tt.key, got, tt.want)
+			t.Errorf("ExtractTenantID(%q) = %q, want %q", tt.key, got, tt.want)
 		}
 	}
 }
