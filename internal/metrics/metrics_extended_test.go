@@ -31,11 +31,16 @@ func TestRequestDurationHistogram(t *testing.T) {
 }
 
 func TestRequestsBlockedByReason(t *testing.T) {
-	RecordBlock("test-reason-one")
-	RecordBlock("test-reason-two")
+	// Reasons embed attacker-controlled text (field names), so labels must be
+	// bounded categories — never the raw reason.
+	RecordBlock(`field "attacker_one" does not exist on type "Query"`)
+	RecordBlock(`field "attacker_two" does not exist on type "Query"`)
 	body := scrapeMetrics(t)
-	if !strings.Contains(body, `reason="test-reason-one"`) {
-		t.Errorf("expected reason label in blocked metric, got body: %s", body)
+	if !strings.Contains(body, `reason="schema_unknown_field"`) {
+		t.Errorf("expected normalised reason label in blocked metric, got body: %s", body)
+	}
+	if strings.Contains(body, "attacker_one") || strings.Contains(body, "attacker_two") {
+		t.Errorf("attacker-supplied text leaked into a metric label: %s", body)
 	}
 }
 

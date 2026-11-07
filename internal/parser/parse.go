@@ -44,6 +44,12 @@ func parseGraphQL(query string) (*QueryInfo, error) {
 		FragmentCount: len(doc.Fragments),
 	}
 
+	// Fragments are document-level, so their metrics are measured once and
+	// replayed for every spread. Analysing them only at their first
+	// (shallowest) spread undercounts every deeper one — a depth-limit
+	// evasion.
+	a := newAnalyzer(doc)
+
 	// Iterate ALL operations for full analysis
 	for _, op := range doc.Operations {
 		currentInfo := &QueryInfo{}
@@ -73,13 +79,14 @@ func parseGraphQL(query string) (*QueryInfo, error) {
 			}
 		}
 
-		// Track visited fragments to prevent infinite recursion on circular refs
+		// Track the active fragment stack to cut cycles, and replay memoised
+		// fragment metrics at every spread.
 		currentInfo.FieldPaths = []string{}
-		visited := make(map[string]bool)
-		walkSelections(op.SelectionSet, "", 0, currentInfo, doc, visited)
+		a.resetPaths()
+		a.walk(op.SelectionSet, "", 0, currentInfo)
 
 		// Count fragment definition directives (for inline + named fragments,
-		// directives are counted inside walkSelections; here we count directives
+		// directives are counted inside walk; here we count directives
 		// on the fragment definitions themselves)
 		for _, frag := range doc.Fragments {
 			currentInfo.Directives += len(frag.Directives)
@@ -130,7 +137,59 @@ func parseGraphQL(query string) (*QueryInfo, error) {
 	return info, nil
 }
 
-func walkSelections(selections ast.SelectionSet, prefix string, depth int, info *QueryInfo, doc *ast.QueryDocument, visited map[string]bool) {
+// maxFragmentDepth bounds how deep a fragment-reference chain may nest. Cycles
+// are cut by the active-spread stack; this additionally stops pathological
+// non-cyclic chains from exhausting the goroutine stack.
+const maxFragmentDepth = 128
+
+// fragStats holds the metrics contributed by one named fragment, measured
+// relative to its spread point (depth 0, empty prefix) so they can be replayed
+// unchanged at any nesting level.
+type fragStats struct {
+	maxRelDepth int
+	fieldCount  int
+	directives  int
+	spreads     int
+	inlineTypes int
+	lists       int
+	argDepth    int
+	paths       []string
+}
+
+// analyzer walks a parsed document accumulating QueryInfo metrics. Fragment
+// metrics are memoised (measured once, replayed per spread) and field paths are
+// deduplicated, so replaying a fragment cannot amplify the path list.
+type analyzer struct {
+	doc   *ast.QueryDocument
+	stack map[string]bool
+	memo  map[string]*fragStats
+	seen  map[string]bool
+}
+
+func newAnalyzer(doc *ast.QueryDocument) *analyzer {
+	return &analyzer{
+		doc:   doc,
+		stack: make(map[string]bool),
+		memo:  make(map[string]*fragStats),
+		seen:  make(map[string]bool),
+	}
+}
+
+// resetPaths starts a fresh path set for a new operation.
+func (a *analyzer) resetPaths() {
+	a.seen = make(map[string]bool)
+}
+
+// addPath records a field path once (set semantics).
+func (a *analyzer) addPath(info *QueryInfo, path string) {
+	if a.seen[path] {
+		return
+	}
+	a.seen[path] = true
+	info.FieldPaths = append(info.FieldPaths, path)
+}
+
+func (a *analyzer) walk(selections ast.SelectionSet, prefix string, depth int, info *QueryInfo) {
 	for _, sel := range selections {
 		switch s := sel.(type) {
 		case *ast.Field:
@@ -160,7 +219,7 @@ func walkSelections(selections ast.SelectionSet, prefix string, depth int, info 
 			if prefix != "" {
 				path = prefix + "." + fieldName
 			}
-			info.FieldPaths = append(info.FieldPaths, path)
+			a.addPath(info, path)
 
 			newDepth := depth + 1
 			if newDepth > info.Depth {
@@ -168,7 +227,7 @@ func walkSelections(selections ast.SelectionSet, prefix string, depth int, info 
 			}
 
 			if s.SelectionSet != nil {
-				walkSelections(s.SelectionSet, path, newDepth, info, doc, visited)
+				a.walk(s.SelectionSet, path, newDepth, info)
 			}
 
 		case *ast.InlineFragment:
@@ -183,7 +242,7 @@ func walkSelections(selections ast.SelectionSet, prefix string, depth int, info 
 			}
 
 			if s.SelectionSet != nil {
-				walkSelections(s.SelectionSet, prefix, depth, info, doc, visited)
+				a.walk(s.SelectionSet, prefix, depth, info)
 			}
 
 		case *ast.FragmentSpread:
@@ -192,18 +251,78 @@ func walkSelections(selections ast.SelectionSet, prefix string, depth int, info 
 			// Count directives on this fragment spread
 			info.Directives += len(s.Directives)
 
-			fragmentName := s.Name
-			// Prevent infinite recursion on circular fragment references
-			if visited[fragmentName] {
+			// Circular fragment references are cut by the active-spread stack;
+			// non-circular references are replayed at every nesting level so a
+			// deeper spread still contributes its full depth.
+			if a.stack[s.Name] {
 				continue
 			}
-			visited[fragmentName] = true
-
-			fragment := doc.Fragments.ForName(fragmentName)
-			if fragment != nil && fragment.SelectionSet != nil {
-				walkSelections(fragment.SelectionSet, prefix, depth, info, doc, visited)
+			stats := a.memo[s.Name]
+			if stats == nil {
+				stats = a.measure(s.Name)
+				if stats == nil {
+					continue
+				}
+				a.memo[s.Name] = stats
 			}
+			a.applyFragmentStats(stats, prefix, depth, info)
 		}
+	}
+}
+
+// measure analyses a named fragment once, in isolation (depth 0, no prefix),
+// and records the result for replay at each spread site.
+func (a *analyzer) measure(name string) *fragStats {
+	fragment := a.doc.Fragments.ForName(name)
+	if fragment == nil || fragment.SelectionSet == nil {
+		return nil
+	}
+	if len(a.stack) >= maxFragmentDepth {
+		// Refuse to descend further; the fragment contributes nothing.
+		return &fragStats{}
+	}
+
+	a.stack[name] = true
+	defer delete(a.stack, name)
+
+	// Private dedupe set: the fragment's paths are relative to its spread point.
+	saved := a.seen
+	a.seen = make(map[string]bool)
+	defer func() { a.seen = saved }()
+
+	tmp := &QueryInfo{FieldPaths: []string{}}
+	a.walk(fragment.SelectionSet, "", 0, tmp)
+
+	return &fragStats{
+		maxRelDepth: tmp.Depth,
+		fieldCount:  tmp.FieldCount,
+		directives:  tmp.Directives,
+		spreads:     tmp.FragmentSpreadCount,
+		inlineTypes: tmp.InlineFragmentTypesCount,
+		lists:       tmp.ListsRequested,
+		argDepth:    tmp.ArgumentDepth,
+		paths:       tmp.FieldPaths,
+	}
+}
+
+// applyFragmentStats replays a fragment's relative metrics at a spread site.
+func (a *analyzer) applyFragmentStats(st *fragStats, prefix string, depth int, info *QueryInfo) {
+	if d := depth + st.maxRelDepth; d > info.Depth {
+		info.Depth = d
+	}
+	info.FieldCount += st.fieldCount
+	info.Directives += st.directives
+	info.FragmentSpreadCount += st.spreads
+	info.InlineFragmentTypesCount += st.inlineTypes
+	info.ListsRequested += st.lists
+	if st.argDepth > info.ArgumentDepth {
+		info.ArgumentDepth = st.argDepth
+	}
+	for _, p := range st.paths {
+		if prefix != "" {
+			p = prefix + "." + p
+		}
+		a.addPath(info, p)
 	}
 }
 

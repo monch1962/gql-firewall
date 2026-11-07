@@ -32,8 +32,10 @@ func TestAttack_DoubleURLEncoding_PathMatches(t *testing.T) {
 		{"/graphql", true},
 		{"/GraphQL", true},
 		{"/GRAPHQL", true},
-		{"/graphql/", false},
-		{"/api/graphql", true},
+		{"/graphql/", true},
+		{"/graphql//", true},
+		{"/graphql/.", true},
+		{"/api/graphql/", true},
 		{"/graphql/sub", false},
 	}
 	for _, tt := range tests {

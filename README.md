@@ -12,7 +12,7 @@ A **GraphQL firewall sidecar** that intercepts, inspects, and secures GraphQL re
 
 ## Attack Coverage
 
-gql-firewall's OPA Rego policies (45 tests) cover 12 attack categories, with 95 additional red-team attack simulation tests at the HTTP transport layer:
+gql-firewall's OPA Rego policies (45 tests) cover 12 attack categories, with 116 additional red-team attack simulation tests at the HTTP transport layer:
 
 ### OPA Policy Coverage (12 categories)
 
@@ -31,7 +31,7 @@ gql-firewall's OPA Rego policies (45 tests) cover 12 attack categories, with 95 
 | 11 | **Query Cost** — Cheap-to-parse, expensive-to-execute queries | `depth × field_count ≤ 50` budget | ✅ |
 | 12 | **Persisted Query Bypass** — Dynamic queries in PQ-only mode | `require_persisted_queries` + hash validation | ✅ |
 
-### Red-Team Verified Transport Protection (95 attack simulation tests)
+### Red-Team Verified Transport Protection (116 attack simulation tests)
 
 All verified with TDD — tests written first, then defenses implemented.
 
@@ -96,8 +96,8 @@ All verified with TDD — tests written first, then defenses implemented.
 | **R63** | **Admin API enormous payload** (10MB config) | `MaxBytesReader` limits body, returns error | ✅ |
 | **R64** | **Multiple GraphQL queries in one body field** | Parser fails on combined syntax → 400 | ✅ |
 | **R65** | **CRLF injection in OPA reason** (response splitting) | `sanitizeReason()` strips chars < 32 and > 126 | ✅ |
-| **R66** | **Admin API empty token** (no auth) | By design for backward compat; documented | ✅ |
-| **R67** | **Rate limiter X-Forwarded-For** | Key derivation now uses first XFF value if present | ✅ |
+| **R66** | **Admin API empty token** (no auth) | Non-loopback binds require `--admin-token`; default bind is loopback | ✅ |
+| **R67** | **Rate limiter X-Forwarded-For** | Buckets keyed on peer IP; XFF honoured only with `--trust-proxy-headers` | ✅ |
 | **R68** | **Mutation fields bypass schema validation** | `Validate()` now checks Mutation/Subscription root types | ✅ |
 | **R69** | **Conjunctive query (many fields + args + depth)** | Parser handles complex combinations correctly | ✅ |
 | **R70** | **Admin API GET to /admin/rules/update** | Returns 405 Method Not Allowed | ✅ |
@@ -113,6 +113,19 @@ All verified with TDD — tests written first, then defenses implemented.
 | **R80** | **Empty OPA endpoint allows all** | Guarded by CLI validation on startup | ✅ |
 | **R81** | **Very long valid field path** | Schema validates without overflow | ✅ |
 | **R82** | **Self-referencing schema types** | No infinite loop in Validate() | ✅ |
+| **R83** | **Batch envelope drops tenant identity** | `X-API-Key` tenant applied to every batch item | ✅ |
+| **R84** | **Decision cache bleeds across tenants** | Cache key includes `tenant_id` | ✅ |
+| **R84b** | **Decision cache bleeds across variables** | Cache key includes request variables | ✅ |
+| **R85** | **Path-encoding collision poisons cache** (`[x.y z]` vs `[x.yz]`) | Length-prefixed path encoding + SHA-256 | ✅ |
+| **R86** | **Block-reason metric cardinality bomb** | Reasons normalised to bounded label categories | ✅ |
+| **R87** | **Admin API exposed without a token** | Non-loopback bind requires `--admin-token` | ✅ |
+| **R88** | **Rate-limit bypass via header rotation** (`X-API-Key`, `X-Forwarded-For`) | Buckets keyed on peer IP; XFF opt-in | ✅ |
+| **R89** | **Rate-limiter bucket-map exhaustion** | `MaxKeys` cap with shared overflow bucket | ✅ |
+| **R90** | **Fragment dedup undercounts depth** | Per-spread fragment metrics (memoised, cycle-safe) | ✅ |
+| **R91** | **Trailing-slash path bypass** (`/graphql/`, `/graphql//`) | Path normalised before inspection | ✅ |
+| **R92** | **Unbounded batch size** | `--max-batch-size` (default 100) | ✅ |
+| **R93** | **Unbounded parse concurrency** | Bounded parse pool, `503` when saturated | ✅ |
+| **R94** | **OPA outage disables every rule** | `--opa-fail-closed` now defaults to `true` | ✅ |
 
 ## CLI Flags
 
@@ -125,28 +138,52 @@ All verified with TDD — tests written first, then defenses implemented.
 | `--opa-embed` | `""` | Path to Rego policy file for embedded OPA evaluation |
 | `--opa-params` | `""` | Path to parameters JSON file for embedded OPA |
 | `--opa-cache-ttl` | `60s` | TTL for cached OPA decisions |
-| `--opa-fail-closed` | `false` | Block when OPA is unreachable |
+| `--opa-fail-closed` | `true` | Block when OPA is unreachable (set `false` to fail open) |
 | `--opa-audit-only` | `false` | Log OPA would-be blocks without enforcing |
 | `--log-format` | `text` | Log format: text or json |
 | `--rate-limit` | `0` | Per-tenant/IP rate limit (req/sec, 0 = disabled) |
 | `--rate-burst` | `0` | Rate limit burst size (0 = 2x rate-limit) |
-| `--admin` | `:8082` | Admin API listen address (empty = disable) |
-| `--admin-token` | `""` | Bearer token for admin API auth |
+| `--trust-proxy-headers` | `false` | Honour `X-Forwarded-For` for rate limiting (trusted proxy only) |
+| `--admin` | `127.0.0.1:8082` | Admin API listen address (empty = disable) |
+| `--admin-token` | `""` | Bearer token for admin API auth (required for non-loopback binds) |
 | `--metrics-listen` | `""` | Separate metrics port (empty = serve on main port) |
 | `--tls-cert` | `""` | TLS certificate file path |
 | `--tls-key` | `""` | TLS private key file path |
 | `--max-body-mb` | `1` | Maximum request body size in MB (0 = unlimited, must be ≥ 0) |
+| `--max-batch-size` | `100` | Maximum queries accepted in one batch request |
+| `--max-concurrent-parses` | `64` | Maximum concurrent query parses (≤ 0 disables the cap) |
 | `--allowed-operation-names` | `""` | Comma-separated list of allowed operation names<br>(blocks unnamed + unlisted when non-empty) |
+
+### Upgrade notes (0.5.0)
+
+Round 8 changes four defaults for fail-safe operation. Each is a deliberate
+behaviour change; the previous behaviour remains available via the noted flag.
+
+- **`--opa-fail-closed` now defaults to `true`.** If OPA is unreachable,
+  requests are blocked instead of allowed. Pass `--opa-fail-closed=false` to
+  restore fail-open.
+- **`--admin` now defaults to `127.0.0.1:8082`.** Binding the admin API to a
+  non-loopback address without `--admin-token` is refused at startup, because
+  unauthenticated rule management is equivalent to disabling the firewall.
+- **`X-Forwarded-For` is ignored for rate limiting** unless
+  `--trust-proxy-headers` is set, so clients can no longer mint fresh buckets.
+- **Batches above `--max-batch-size` (100) are rejected**, and more than
+  `--max-concurrent-parses` (64) simultaneous parses return `503`.
 
 ### Security Features
 
 | Feature | Flag / Config | What it prevents |
 |---|---|---|
 | **Admin API auth** | `--admin-token` | Unauthorized admin API access (C-1) |
-| **OPA fail-closed** | `--opa-fail-closed` | Bypass via OPA DoS (C-2) |
+| **OPA fail-closed** | `--opa-fail-closed` (default on) | Bypass via OPA DoS (C-2) |
 | **Config validation** | Built-in | Disabled protections via empty config (C-3) |
 | **TLS encryption** | `--tls-cert` + `--tls-key` | Cleartext interception (H-5) |
 | **Body size limit** | `--max-body-mb` | OOM via oversized requests (H-6) |
+| **Batch size limit** | `--max-batch-size` | Amplification via batch arrays |
+| **Bounded parse pool** | `--max-concurrent-parses` | Goroutine / CPU exhaustion |
+| **Rate-limit key integrity** | `--trust-proxy-headers` (off) | Throttling bypass via forged headers |
+| **Rate-limiter memory cap** | Built-in (`MaxKeys`) | Bucket-map exhaustion |
+| **Admin bind guard** | `--admin` (loopback) / `--admin-token` | Unauthenticated rule rewrite |
 | **Server timeouts** | Built-in | Slow loris / connection exhaustion (H-7) |
 | **Tenant key validation** | Via API | Tenant impersonation (H-2) |
 | **Sanitized errors** | Built-in | Information disclosure (H-4) |
@@ -434,13 +471,13 @@ gql-firewall/
 │   ├── parser/                    # GraphQL query analysis (45 tests, including Rust compat)
 │   ├── opa/                       # OPA evaluator: sidecar, embedded, data store, input builder (63 tests)
 │   ├── metrics/                   # Prometheus instrumentation (6 tests)
-│   ├── proxy/                     # HTTP reverse proxy (88 tests, including 39 red-team + 8 hardening + 9 input handling + 10 round 6)
-│   ├── ratelimit/                 # Token-bucket rate limiter (6 tests)
+│   ├── proxy/                     # HTTP reverse proxy (149 tests, incl. rounds 1–8)
+│   ├── ratelimit/                 # Token-bucket rate limiter (7 tests)
 │   ├── testutil/                  # Shared test helpers  
-│   └── integration/               # End-to-end pipeline tests (23 tests, including 19 e2e HTTP tests)
-├── opa-policies/                  # OPA Rego policy templates (33 tests)
+│   └── integration/               # End-to-end pipeline tests (20 tests, including e2e HTTP tests)
+├── opa-policies/                  # OPA Rego policy templates (45 tests)
 │   ├── graphql.rego              # 12 attack categories, parameterized via input.params
-│   └── graphql_test.rego         # 33 policy tests
+│   └── graphql_test.rego         # 45 policy tests
 ├── README.md
 ├── go.mod / go.sum
 └── .gitignore
@@ -449,9 +486,10 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           269 tests — server(25), parser(123), proxy(96), integration(23), opa(63), metrics(14), ratelimit(7)
-OPA/Rego:     37 tests  — 12 attack categories, edge cases, combined rules, operation-name allowlist
-Total:       306 tests  — all passing
+Go:           387 test functions (459 including subtests)
+              server(38), parser(101), proxy(149), integration(20), opa(61), metrics(11), ratelimit(7)
+OPA/Rego:     45 tests   — 12 attack categories, edge cases, combined rules, operation-name allowlist
+Total:        432 test functions (504 including subtests) — all passing
 ```
 
 ```bash

@@ -262,6 +262,8 @@ func TestAttack_VeryManyFields_Parses(t *testing.T) {
 }
 
 // ── R58: Batch query with 1000 items ──────────────────────────────
+// Round 8: batches are capped (DefaultMaxBatchSize) so an oversized array is
+// rejected before inspection; a batch at the limit is still fully inspected.
 func TestAttack_BatchManyItems_AllInspected(t *testing.T) {
 	callCount := 0
 	up := testUpstream(t, func(w http.ResponseWriter, r *http.Request) { callCount++; w.WriteHeader(http.StatusOK) })
@@ -269,20 +271,34 @@ func TestAttack_BatchManyItems_AllInspected(t *testing.T) {
 
 	h := MustNew(up.URL, passEval)
 
-	// Build a batch with 1000 items
-	var items []map[string]string
-	for i := 0; i < 1000; i++ {
-		items = append(items, map[string]string{"query": fmt.Sprintf("{ f%d }", i)})
+	makeBatch := func(n int) []byte {
+		items := make([]map[string]string, 0, n)
+		for i := 0; i < n; i++ {
+			items = append(items, map[string]string{"query": fmt.Sprintf("{ f%d }", i)})
+		}
+		body, _ := json.Marshal(items)
+		return body
 	}
-	body, _ := json.Marshal(items)
 
-	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader(body))
+	// Oversized: rejected without touching the upstream.
+	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader(makeBatch(1000)))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for oversized batch, got %d", w.Code)
+	}
+	if callCount != 0 {
+		t.Errorf("oversized batch reached upstream %d time(s)", callCount)
+	}
 
+	// At the limit: forwarded once.
+	req = httptest.NewRequest("POST", "/graphql", bytes.NewReader(makeBatch(DefaultMaxBatchSize)))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
-		t.Errorf("expected 200 for large batch, got %d", w.Code)
+		t.Errorf("expected 200 for batch at the limit, got %d", w.Code)
 	}
 	if callCount != 1 {
 		t.Errorf("expected upstream called once, got %d calls", callCount)

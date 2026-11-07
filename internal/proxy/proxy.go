@@ -6,12 +6,14 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -25,6 +27,17 @@ const DefaultMaxBodyBytes = 1 * 1024 * 1024
 
 // DefaultParseTimeout is the maximum time allowed for GraphQL query parsing.
 const DefaultParseTimeout = 5 * time.Second
+
+// DefaultMaxBatchSize is the maximum number of queries accepted in one batch.
+const DefaultMaxBatchSize = 100
+
+// DefaultMaxConcurrentParses bounds how many queries are parsed at once.
+// A timeout abandons the wait but not the work, so without a cap an attacker
+// can grow parse goroutines without bound.
+const DefaultMaxConcurrentParses = 64
+
+// errParseBusy is returned when the bounded parse pool is saturated.
+var errParseBusy = errors.New("parse pool saturated")
 
 // sanitizeError returns a generic error message suitable for client responses.
 func sanitizeError(context string) string {
@@ -77,8 +90,10 @@ type Handler struct {
 	evaluator            Evaluator
 	MaxBodyBytes         int64
 	MaxCacheSize         int
+	MaxBatchSize         int           // 0 = DefaultMaxBatchSize
 	ParseTimeout         time.Duration
-	disablePanicRecovery bool // for testing
+	parseSem             chan struct{} // bounded parse concurrency
+	disablePanicRecovery bool          // for testing
 }
 
 // New creates a new proxy handler that forwards to upstreamURL after
@@ -99,6 +114,7 @@ func New(upstreamURL string, evaluator Evaluator) (*Handler, error) {
 		evaluator:    evaluator,
 		MaxBodyBytes: DefaultMaxBodyBytes,
 		ParseTimeout: DefaultParseTimeout,
+		parseSem:     make(chan struct{}, DefaultMaxConcurrentParses),
 	}, nil
 }
 
@@ -164,9 +180,83 @@ func (h *Handler) recoverPanic(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// normalizePath collapses duplicate separators and dot segments so every
+// spelling of the endpoint is recognised (/graphql/, /graphql//, /graphql/.,
+// /api/graphql/). Without this, the firewall inspects only the exact
+// "/graphql" suffix and forwards all other spellings uninspected, while
+// prefix-mounting servers (Express, many ingresses) still execute them.
+func normalizePath(p string) string {
+	if p == "" {
+		return "/"
+	}
+	clean := path.Clean(p)
+	if len(clean) > 1 {
+		clean = strings.TrimRight(clean, "/")
+	}
+	return strings.ToLower(clean)
+}
+
 func isGraphQLPath(path string) bool {
-	lower := strings.ToLower(path)
-	return strings.HasSuffix(lower, "/graphql")
+	return strings.HasSuffix(normalizePath(path), "/graphql")
+}
+
+// maxBatchSize returns the effective batch limit.
+func (h *Handler) maxBatchSize() int {
+	if h.MaxBatchSize > 0 {
+		return h.MaxBatchSize
+	}
+	return DefaultMaxBatchSize
+}
+
+// applyTenant records the tenant identity derived from the API key header.
+func applyTenant(r *http.Request, info *parser.QueryInfo) {
+	info.TenantID = tenantFromRequest(r)
+}
+
+// tenantFromRequest derives the tenant ID from the API key header, or "".
+func tenantFromRequest(r *http.Request) string {
+	if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
+		return extractTenantID(apiKey)
+	}
+	return ""
+}
+
+// SetParseConcurrency resizes the parse worker pool. A value <= 0 disables the
+// cap. Call before serving; it is not safe to call concurrently with requests.
+func (h *Handler) SetParseConcurrency(n int) {
+	if n <= 0 {
+		h.parseSem = nil
+		return
+	}
+	h.parseSem = make(chan struct{}, n)
+}
+
+// parse runs the parser inside the bounded worker pool. A saturated pool is
+// reported rather than queued, so load cannot be amplified by waiting.
+func (h *Handler) parse(query string) (*parser.QueryInfo, error) {
+	if h.parseSem == nil {
+		return parseQueryWithTimeout(query, h.ParseTimeout)
+	}
+	select {
+	case h.parseSem <- struct{}{}:
+		defer func() { <-h.parseSem }()
+		return parseQueryWithTimeout(query, h.ParseTimeout)
+	default:
+		return nil, errParseBusy
+	}
+}
+
+// writeParseError responds to a parse failure, distinguishing pool saturation
+// (503, retryable) from an invalid query (400).
+func writeParseError(w http.ResponseWriter, err error, start time.Time) {
+	status := http.StatusBadRequest
+	msg := sanitizeError("query")
+	if errors.Is(err, errParseBusy) {
+		status = http.StatusServiceUnavailable
+		msg = "server busy"
+	}
+	http.Error(w, fmt.Sprintf(`{"error": %q}`, msg), status)
+	metrics.RecordRequest("error", "unknown", time.Since(start))
 }
 
 func hasJSONContentType(headers http.Header) bool {
@@ -236,10 +326,9 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse GraphQL query with timeout to prevent CPU exhaustion (H3 fix)
-	queryInfo, err := parseQueryWithTimeout(gqlReq.Query, h.ParseTimeout)
+	queryInfo, err := h.parse(gqlReq.Query)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("query")), http.StatusBadRequest)
-		metrics.RecordRequest("error", "unknown", time.Since(start))
+		writeParseError(w, err, start)
 		return
 	}
 
@@ -264,10 +353,9 @@ func (h *Handler) handleGraphQLGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	queryInfo, err := parseQueryWithTimeout(query, h.ParseTimeout)
+	queryInfo, err := h.parse(query)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("query")), http.StatusBadRequest)
-		metrics.RecordRequest("error", "unknown", time.Since(start))
+		writeParseError(w, err, start)
 		return
 	}
 
@@ -303,6 +391,18 @@ func (h *Handler) handleGraphQLBatch(w http.ResponseWriter, r *http.Request, bod
 		return
 	}
 
+	// Cap the batch: every item costs a parse plus an evaluation, so an
+	// unbounded array turns one request into thousands of pipeline runs.
+	if max := h.maxBatchSize(); len(batch) > max {
+		http.Error(w, fmt.Sprintf(`{"error": "batch size exceeds limit of %d"}`, max), http.StatusBadRequest)
+		metrics.RecordRequest("error", "unknown", time.Since(start))
+		return
+	}
+
+	// Tenant identity must apply to every item, exactly as it does to a single
+	// request: otherwise the array envelope sidesteps all per-tenant rules.
+	tenant := tenantFromRequest(r)
+
 	// Evaluate each query in the batch
 	firstOpType := "unknown"
 	for i, req := range batch {
@@ -311,12 +411,17 @@ func (h *Handler) handleGraphQLBatch(w http.ResponseWriter, r *http.Request, bod
 			metrics.RecordRequest("error", "unknown", time.Since(start))
 			return
 		}
-		queryInfo, err := parseQueryWithTimeout(req.Query, h.ParseTimeout)
+		queryInfo, err := h.parse(req.Query)
 		if err != nil {
+			if errors.Is(err, errParseBusy) {
+				writeParseError(w, err, start)
+				return
+			}
 			http.Error(w, fmt.Sprintf(`{"error": "invalid GraphQL query at batch index %d"}`, i), http.StatusBadRequest)
 			metrics.RecordRequest("error", "unknown", time.Since(start))
 			return
 		}
+		queryInfo.TenantID = tenant
 		if len(req.Variables) > 0 {
 			queryInfo.RequestVariables = req.Variables
 		}
@@ -354,9 +459,7 @@ func (h *Handler) handleGraphQLBatch(w http.ResponseWriter, r *http.Request, bod
 // evaluateAndForward evaluates a single query and forwards it upstream if allowed.
 func (h *Handler) evaluateAndForward(w http.ResponseWriter, r *http.Request, bodyBytes []byte, queryInfo *parser.QueryInfo, start time.Time) {
 	// Extract tenant from X-API-Key header
-	if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
-		queryInfo.TenantID = extractTenantID(apiKey)
-	}
+	applyTenant(r, queryInfo)
 
 	metrics.RecordRuleEval(fmt.Sprintf("op_%s", queryInfo.OperationType))
 

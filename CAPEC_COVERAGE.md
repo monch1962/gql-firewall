@@ -437,3 +437,30 @@ These patterns are handled by the OS/network stack, Go's standard library, or ar
 - 🟢 **Inherently protected (Go/stdlib/OS):** 65 patterns with verification tests
 - 🟢 **Upstream responsibility (proxy is transparent):** 18 patterns
 - 🟢 **Batch-marked (not applicable / not testable at proxy layer):** 46 patterns
+
+## Round 8 (Behavioural): Inspection/Execution Mismatches & Resource Exhaustion
+
+Round 8 targets places where the firewall's *decision* and the upstream's
+*execution* can diverge, and where attacker input drives unbounded resource
+use. These vectors have no dedicated CAPEC 3.9 entry; the nearest pattern is
+recorded for traceability.
+
+| ID | Vector | Class | Nearest CAPEC | Test file |
+|---|---|---|---|---|
+| R83 | Batch envelope drops tenant identity | Inspection/execution mismatch | CAPEC-21 | internal/proxy/attack_round8_test.go |
+| R84 | Decision cache bleeds across tenants | Cache poisoning | CAPEC-141 | cmd/server/attack_round8_test.go |
+| R84b | Decision cache bleeds across variables | Cache poisoning | CAPEC-141 | cmd/server/attack_round8_test.go |
+| R85 | Path-encoding collision poisons cache | Cache poisoning | CAPEC-141 | cmd/server/attack_round8_test.go |
+| R86 | Block-reason metric cardinality bomb | Resource exhaustion | CAPEC-130 | cmd/server/attack_round8_test.go |
+| R87 | Admin API exposed without a token | Insecure default | CAPEC-1 | cmd/server/attack_round8_test.go |
+| R88 | Rate-limit bypass via header rotation | Control bypass | CAPEC-272 | cmd/server/attack_round8_test.go |
+| R89 | Rate-limiter bucket-map exhaustion | Resource exhaustion | CAPEC-130 | internal/ratelimit/attack_round8_test.go |
+| R90 | Fragment dedup undercounts depth | Limit evasion | CAPEC-130 | internal/parser/attack_round8_test.go |
+| R91 | Trailing-slash path bypass | Path normalisation mismatch | CAPEC-274 | internal/proxy/attack_round8_test.go |
+| R92 | Unbounded batch size | Resource exhaustion | CAPEC-130 | internal/proxy/attack_round8_test.go |
+| R93 | Unbounded parse concurrency | Resource exhaustion | CAPEC-130 | internal/proxy/attack_round8_test.go |
+| R94 | OPA outage disables every rule | Availability-driven bypass | CAPEC-578 | cmd/server/attack_round8_test.go |
+
+**Result:** 13 vectors, 15 TDD test functions (14 attack + 1 amplifier guard),
+all RED→GREEN. Two pre-existing tests — R58 (oversized batch) and R77
+(`/graphql/` path) — asserted the vulnerable behaviour and were corrected.

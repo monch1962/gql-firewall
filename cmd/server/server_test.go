@@ -201,15 +201,15 @@ func TestDecisionCacheKey_DifferentOperations(t *testing.T) {
 	}
 }
 
-func TestSimpleHash(t *testing.T) {
-	if simpleHash([]string{"a"}) != simpleHash([]string{"a"}) {
-		t.Error("expected consistent hashes")
+func TestDecisionCacheKey_TenantAndVariables(t *testing.T) {
+	if decisionCacheKey(qi(tenantID("tenant-a"))) == decisionCacheKey(qi(tenantID("tenant-b"))) {
+		t.Error("expected different keys for different tenants")
 	}
-	if simpleHash([]string{"user.name"}) == simpleHash([]string{"user.ssn"}) {
-		t.Error("expected different hashes for different inputs")
+	if decisionCacheKey(qi(withVars(`{"x":1}`))) == decisionCacheKey(qi(withVars(`{"x":2}`))) {
+		t.Error("expected different keys for different request variables")
 	}
-	if h := simpleHash(nil); h == "" || h == "00000000" {
-		t.Errorf("expected non-zero hash for nil, got %q", h)
+	if got := len(decisionCacheKey(qi())); got != 32 {
+		t.Errorf("expected fixed-width 16-byte digest, got %d chars", got)
 	}
 }
 
@@ -270,10 +270,12 @@ func TestEval_FieldCountBlocked(t *testing.T) {
 	assertBlock(t, r, err, "field count")
 }
 
-// OPA fail-closed
-func TestEval_OPAFailOpenByDefault(t *testing.T) {
+// OPA failure handling: fail-open is now opt-in. The secure default
+// (fail-closed) is asserted by TestAttack_OPAFailOpenIsNotDefault.
+func TestEval_OPAFailOpenExplicit(t *testing.T) {
 	e := newEval()
 	e.opa = opa.NewSidecar("http://localhost:19999")
+	e.opaFailClosed = false
 	r, err := e.Evaluate(qi())
 	assertAllow(t, r, err)
 }

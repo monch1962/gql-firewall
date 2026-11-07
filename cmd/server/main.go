@@ -3,15 +3,18 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -24,7 +27,36 @@ import (
 	"github.com/monch1962/gql-firewall/internal/ratelimit"
 )
 
-const version = "0.4.0"
+const version = "0.5.0"
+
+// defaultOPAFailClosed selects the behaviour when the policy engine cannot be
+// reached: closed (block) is the secure default. Failing open means an
+// attacker who can make OPA slow or unreachable disables every rule.
+const defaultOPAFailClosed = true
+
+// trustProxyHeaders controls whether X-Forwarded-For is honoured for rate
+// limiting. It must stay off unless the firewall sits behind a proxy that
+// overwrites the header, because clients can otherwise mint fresh buckets.
+var trustProxyHeaders = false
+
+// validateAdminBind rejects admin API binds that would expose unauthenticated
+// rule management beyond the local host.
+func validateAdminBind(addr, token string) error {
+	if addr == "" || token != "" {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = strings.Trim(addr, "[]")
+	}
+	if host == "localhost" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("admin API would be reachable without authentication on %q: set --admin-token or bind to 127.0.0.1", addr)
+}
 
 func main() {
 	var (
@@ -34,18 +66,21 @@ func main() {
 		opaEmbed        = flag.String("opa-embed", "", "Path to Rego policy file for embedded evaluation (default: built-in policy)")
 		opaParams       = flag.String("opa-params", "", "Path to parameters JSON file for embedded OPA")
 		schemaPath      = flag.String("schema", "", "Path to GraphQL SDL schema file (optional)")
-		adminListenAddr = flag.String("admin", ":8082", "Admin API listen address (set to empty to disable)")
+		adminListenAddr = flag.String("admin", "127.0.0.1:8082", "Admin API listen address (set to empty to disable)")
 		adminToken      = flag.String("admin-token", "", "Required bearer token for admin API (C-1 fix)")
 		cacheTTL        = flag.Duration("opa-cache-ttl", 60*time.Second, "TTL for cached OPA decisions (0 = disabled)")
-		opaFailClosed   = flag.Bool("opa-fail-closed", false, "Block requests when OPA is unreachable (C-2 fix)")
+		opaFailClosed   = flag.Bool("opa-fail-closed", defaultOPAFailClosed, "Block requests when OPA is unreachable (set false to fail open)")
 		opaAuditOnly    = flag.Bool("opa-audit-only", false, "Run OPA in audit-only mode (log would-be blocks, don't enforce)")
 		maxBodyMB       = flag.Int64("max-body-mb", 1, "Maximum request body size in MB (H-6 fix)")
+		maxBatchSize    = flag.Int("max-batch-size", proxy.DefaultMaxBatchSize, "Maximum queries accepted in one batch request")
+		maxConcurrent   = flag.Int("max-concurrent-parses", proxy.DefaultMaxConcurrentParses, "Maximum concurrent query parses (<=0 disables the cap)")
 		tlsCert         = flag.String("tls-cert", "", "Path to TLS certificate file (H-5 fix)")
 		tlsKey          = flag.String("tls-key", "", "Path to TLS private key file (H-5 fix)")
 		metricsListen   = flag.String("metrics-listen", "", "Separate listen address for metrics (M-4 fix)")
 		logFormat       = flag.String("log-format", "text", "Log format: text or json")
 		ratePerSec      = flag.Float64("rate-limit", 0, "Per-tenant/IP rate limit (requests/sec, 0 = disabled)")
 		rateBurst       = flag.Int("rate-burst", 0, "Rate limit burst size (0 = 2x rate-limit)")
+		trustProxy      = flag.Bool("trust-proxy-headers", false, "Honour X-Forwarded-For for rate limiting (only behind a trusted proxy)")
 		allowedOpNames  = flag.String("allowed-operation-names", "", "Comma-separated list of allowed operation names (empty = allow all)")
 	)
 	flag.Parse()
@@ -80,6 +115,12 @@ func main() {
 	// Validate flags with non-positive defaults
 	if *maxBodyMB < 0 {
 		log.Fatal("--max-body-mb must be >= 0 (0 = unlimited)")
+	}
+
+	trustProxyHeaders = *trustProxy
+
+	if err := validateAdminBind(*adminListenAddr, *adminToken); err != nil {
+		log.Fatal(err)
 	}
 
 	// Load SDL schema for schema-aware validation
@@ -166,6 +207,8 @@ func main() {
 		os.Exit(1)
 	}
 	handler.MaxBodyBytes = *maxBodyMB * 1024 * 1024
+	handler.MaxBatchSize = *maxBatchSize
+	handler.SetParseConcurrency(*maxConcurrent)
 
 	// Rate limiter (optional)
 	var rateLimitHandler http.Handler = handler
@@ -177,6 +220,7 @@ func main() {
 		rl := ratelimit.New(ratelimit.Config{
 			RequestsPerSecond: *ratePerSec,
 			Burst:             burst,
+			MaxKeys:           ratelimit.DefaultMaxKeys,
 		})
 		defer rl.Stop()
 		rateLimitHandler = rateLimitMiddleware(rl, handler)
@@ -248,29 +292,55 @@ func main() {
 // rateLimitMiddleware wraps an http.Handler with per-key token-bucket rate limiting.
 func rateLimitMiddleware(rl *ratelimit.Limiter, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := r.RemoteAddr
-		// Use X-Forwarded-For if present (first address in chain)
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if idx := strings.IndexByte(xff, ','); idx > 0 {
-				key = strings.TrimSpace(xff[:idx])
-			} else {
-				key = strings.TrimSpace(xff)
+		for _, key := range rateLimitKeys(r) {
+			if !rl.Allow(key) {
+				writeRateLimited(w, r, key)
+				return
 			}
-		}
-		// Override with API key if available
-		if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
-			key = apiKey
-		}
-		if !rl.Allow(key) {
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("Retry-After", "1")
-			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(`{"error":"rate limit exceeded","retry_after":1}`))
-			slog.Warn("rate limit exceeded", "key", key, "path", r.URL.Path)
-			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// rateLimitKeys returns every bucket a request must satisfy: the peer address
+// (always) plus a hash of the API key (when supplied). Client-controlled
+// headers must never *replace* the address key, otherwise rotating them mints
+// an unlimited supply of fresh buckets.
+func rateLimitKeys(r *http.Request) []string {
+	keys := []string{"ip:" + peerIP(r)}
+	if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
+		sum := sha256.Sum256([]byte(apiKey))
+		keys = append(keys, fmt.Sprintf("key:%x", sum[:8]))
+	}
+	return keys
+}
+
+// peerIP returns the address used for rate limiting. X-Forwarded-For is only
+// honoured when explicitly enabled with --trust-proxy-headers.
+func peerIP(r *http.Request) string {
+	if trustProxyHeaders {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			first := xff
+			if idx := strings.IndexByte(xff, ','); idx > 0 {
+				first = xff[:idx]
+			}
+			if ip := strings.TrimSpace(first); ip != "" {
+				return ip
+			}
+		}
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func writeRateLimited(w http.ResponseWriter, r *http.Request, key string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", "1")
+	w.WriteHeader(http.StatusTooManyRequests)
+	w.Write([]byte(`{"error":"rate limit exceeded","retry_after":1}`))
+	slog.Warn("rate limit exceeded", "key", key, "path", r.URL.Path)
 }
 
 // requireAdminAuth is HTTP middleware for admin API authentication (C-1 fix).
@@ -504,20 +574,24 @@ func (c *compositeEvaluator) Evaluate(info *parser.QueryInfo) (*opa.Result, erro
 	return result, nil
 }
 
-// decisionCacheKey builds a cache key from query info.
+// decisionCacheKey builds a cache key from everything that can change a
+// decision: operation type and name, tenant identity, request variables, depth,
+// field count and the exact field paths. Field paths are length-prefixed so
+// distinct path sets cannot encode identically (["x.y","z"] vs ["x.yz"]), and
+// the tenant and variables are included so one caller's cached decision can
+// never be replayed for another.
 func decisionCacheKey(info *parser.QueryInfo) string {
-	pathHash := simpleHash(info.FieldPaths)
-	return fmt.Sprintf("%s|%d|%d|%s", info.OperationType, info.Depth, info.FieldCount, pathHash)
-}
-
-// simpleHash produces a compact hash from a string slice for cache keys.
-func simpleHash(parts []string) string {
-	h := uint64(14695981039346656037)
-	for _, s := range parts {
-		for _, c := range []byte(s) {
-			h ^= uint64(c)
-			h *= 1099511628211
+	h := sha256.New()
+	write := func(parts ...string) {
+		for _, s := range parts {
+			fmt.Fprintf(h, "%d:%s|", len(s), s)
 		}
 	}
-	return fmt.Sprintf("%08x", h)
+	write(info.OperationType, info.OperationName, info.TenantID, info.QueryHash)
+	write(strconv.Itoa(info.Depth), strconv.Itoa(info.FieldCount))
+	write(string(info.RequestVariables))
+	for _, p := range info.FieldPaths {
+		write(p)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)[:16])
 }

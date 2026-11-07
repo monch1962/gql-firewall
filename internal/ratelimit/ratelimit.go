@@ -11,6 +11,9 @@ import (
 type Config struct {
 	RequestsPerSecond float64
 	Burst             int
+	// MaxKeys caps the number of tracked buckets. Zero applies DefaultMaxKeys;
+	// a negative value means unlimited (not recommended).
+	MaxKeys int
 }
 
 // Limiter implements per-key token-bucket rate limiting.
@@ -20,6 +23,15 @@ type Limiter struct {
 	config  Config
 	stopCh  chan struct{}
 }
+
+// DefaultMaxKeys caps the number of tracked buckets so that unauthenticated
+// key rotation (forged headers) cannot grow the map without bound.
+const DefaultMaxKeys = 100_000
+
+// overflowKey is the shared bucket used once MaxKeys is reached, so that new
+// keys are throttled together instead of each receiving a full burst (which
+// would make the cap itself a bypass).
+const overflowKey = "\x00overflow"
 
 type bucket struct {
 	tokens   float64
@@ -33,6 +45,9 @@ func New(cfg Config) *Limiter {
 	}
 	if cfg.Burst <= 0 {
 		cfg.Burst = 200
+	}
+	if cfg.MaxKeys == 0 {
+		cfg.MaxKeys = DefaultMaxKeys
 	}
 	l := &Limiter{
 		buckets: make(map[string]*bucket),
@@ -48,14 +63,7 @@ func (l *Limiter) Allow(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	b, ok := l.buckets[key]
-	if !ok {
-		b = &bucket{
-			tokens:   float64(l.config.Burst),
-			lastTick: time.Now(),
-		}
-		l.buckets[key] = b
-	}
+	b := l.bucketFor(key)
 
 	now := time.Now()
 	elapsed := now.Sub(b.lastTick).Seconds()
@@ -70,6 +78,34 @@ func (l *Limiter) Allow(key string) bool {
 	}
 	b.tokens--
 	return true
+}
+
+// bucketFor returns the bucket for key, creating it if needed. Once MaxKeys is
+// reached, unseen keys share one overflow bucket so the cap cannot be turned
+// into a bypass.
+func (l *Limiter) bucketFor(key string) *bucket {
+	if b, ok := l.buckets[key]; ok {
+		return b
+	}
+	if l.config.MaxKeys > 0 && len(l.buckets) >= l.config.MaxKeys {
+		key = overflowKey
+		if b, ok := l.buckets[key]; ok {
+			return b
+		}
+	}
+	b := &bucket{
+		tokens:   float64(l.config.Burst),
+		lastTick: time.Now(),
+	}
+	l.buckets[key] = b
+	return b
+}
+
+// BucketCount returns the number of tracked buckets.
+func (l *Limiter) BucketCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.buckets)
 }
 
 func (l *Limiter) cleanup() {
