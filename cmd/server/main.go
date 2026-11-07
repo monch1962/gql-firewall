@@ -28,7 +28,7 @@ import (
 	"github.com/monch1962/gql-firewall/internal/tenant"
 )
 
-const version = "0.5.1"
+const version = "0.6.0"
 
 // defaultOPAFailClosed selects the behaviour when the policy engine cannot be
 // reached: closed (block) is the secure default. Failing open means an
@@ -39,6 +39,21 @@ const defaultOPAFailClosed = true
 // limiting. It must stay off unless the firewall sits behind a proxy that
 // overwrites the header, because clients can otherwise mint fresh buckets.
 var trustProxyHeaders = false
+
+// tenantSecrets resolves the HMAC secret list: the flag first, then the
+// environment, so the value need not appear in the process list.
+func tenantSecrets(spec string) []string {
+	if spec == "" {
+		spec = os.Getenv("GQL_TENANT_KEY_SECRET")
+	}
+	var secrets []string
+	for _, s := range strings.Split(spec, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			secrets = append(secrets, s)
+		}
+	}
+	return secrets
+}
 
 // validateAdminBind rejects admin API binds that would expose unauthenticated
 // rule management beyond the local host.
@@ -83,9 +98,13 @@ func main() {
 		rateBurst       = flag.Int("rate-burst", 0, "Rate limit burst size (0 = 2x rate-limit)")
 		trustProxy      = flag.Bool("trust-proxy-headers", false, "Honour X-Forwarded-For for rate limiting (only behind a trusted proxy)")
 		allowedOpNames  = flag.String("allowed-operation-names", "", "Comma-separated list of allowed operation names (empty = allow all)")
-		tenantMode      = flag.String("tenant-mode", "header", "Tenant identity mode (header = unverified, for trusted gateways)")
+		tenantMode      = flag.String("tenant-mode", "header", "Tenant identity mode: header (unverified, for trusted gateways) or hmac (signed keys)")
 		unknownTenant   = flag.String("unknown-tenant", "deny", "Unregistered tenant IDs: deny|allow (deny applies only when tenants are registered)")
 		cacheMaxEntries = flag.Int("opa-cache-max-entries", defaultDecisionCacheEntries, "Maximum cached OPA decisions (0 = default, negative = unlimited)")
+		tenantKeySecret = flag.String("tenant-key-secret", "", "HMAC secret(s) for --tenant-mode=hmac, comma-separated newest first (or env GQL_TENANT_KEY_SECRET)")
+		allowUnsigned   = flag.Bool("tenant-allow-unsigned", false, "Accept unsigned tenant keys in hmac mode during migration (still labelled unverified)")
+		issueTenant     = flag.String("tenant-key-issue", "", "Issue a signed tenant key for this tenant ID, print it and exit")
+		issueTTL        = flag.Duration("tenant-key-ttl", 720*time.Hour, "Lifetime for --tenant-key-issue (0 = no expiry)")
 	)
 	flag.Parse()
 
@@ -108,6 +127,16 @@ func main() {
 		"log_format", *logFormat,
 	)
 
+	// Issue a tenant key and exit; no server or policy engine is needed.
+	if *issueTenant != "" {
+		key, err := tenant.IssueKey(*issueTenant, tenantSecrets(*tenantKeySecret), *issueTTL, time.Now())
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(key)
+		return
+	}
+
 	// Validate: at least one OPA mode must be configured
 	if *opaEndpoint == "" && *opaEmbed == "" {
 		log.Fatal("either --opa (sidecar) or --opa-embed (embedded Rego) must be configured")
@@ -127,9 +156,16 @@ func main() {
 		log.Fatal(err)
 	}
 
-	resolver, err := tenant.ResolverFor(*tenantMode)
+	resolver, err := tenant.ResolverFor(*tenantMode, tenant.Options{
+		Secrets:       tenantSecrets(*tenantKeySecret),
+		AllowUnsigned: *allowUnsigned,
+		ClockSkew:     60 * time.Second,
+	})
 	if err != nil {
 		log.Fatal(err)
+	}
+	if *tenantMode == "hmac" && *allowUnsigned {
+		slog.Warn("unsigned tenant keys are still accepted (migration mode); set --tenant-allow-unsigned=false once clients use signed keys")
 	}
 	switch *unknownTenant {
 	case "deny", "allow":

@@ -209,24 +209,39 @@ func (h *Handler) maxBatchSize() int {
 	return DefaultMaxBatchSize
 }
 
-// applyTenant records the resolved tenant identity on the query info.
-func (h *Handler) applyTenant(r *http.Request, info *parser.QueryInfo) {
-	id := h.resolveIdentity(r)
+// applyIdentity records the resolved tenant identity on the query info.
+func applyIdentity(info *parser.QueryInfo, id tenant.Identity) {
 	info.TenantID = id.TenantID
 	info.TenantIdentitySource = string(id.Source)
 }
 
 // resolveIdentity establishes tenant identity and records how it was
-// established, so operators can see how much traffic is unverified and alert on
-// a spike in unregistered claims.
-func (h *Handler) resolveIdentity(r *http.Request) tenant.Identity {
-	id := h.resolver().Resolve(r)
-	result := "absent"
-	if id.TenantID != "" {
-		result = "present"
+// established, so operators can see how much traffic is unverified, invalid or
+// unregistered.
+func (h *Handler) resolveIdentity(r *http.Request) (tenant.Identity, error) {
+	id, err := h.resolver().Resolve(r)
+	if id.Source == "" {
+		id.Source = tenant.SourceNone
+	}
+	result := "present"
+	switch {
+	case err != nil:
+		result = "invalid"
+	case id.TenantID == "":
+		result = "absent"
 	}
 	metrics.RecordTenantIdentity(string(id.Source), result)
-	return id
+	return id, err
+}
+
+// writeTenantAuthError responds 401 for credentials that cannot be verified.
+// The presented value is never echoed back: a client that sent a secret in this
+// header must not see it reflected in the response.
+func writeTenantAuthError(w http.ResponseWriter, err error, start time.Time) {
+	log.Printf("[TENANT] rejected credentials: %v", err)
+	setSecurityHeaders(w)
+	http.Error(w, `{"error": "invalid tenant credentials"}`, http.StatusUnauthorized)
+	metrics.RecordRequest("error", "unknown", time.Since(start))
 }
 
 // resolver returns the configured tenant resolver, defaulting to the
@@ -293,6 +308,12 @@ func hasJSONContentType(headers http.Header) bool {
 func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
+	ident, err := h.resolveIdentity(r)
+	if err != nil {
+		writeTenantAuthError(w, err, start)
+		return
+	}
+
 	// Apply body size limit only when positive (0 or negative = unlimited)
 	if h.MaxBodyBytes > 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, h.MaxBodyBytes)
@@ -354,7 +375,7 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		queryInfo.RequestVariables = gqlReq.Variables
 	}
 
-	h.evaluateAndForward(w, r, bodyBytes, queryInfo, start)
+	h.evaluateAndForward(w, r, bodyBytes, queryInfo, ident, start)
 }
 
 // handleGraphQLGet handles GET requests to GraphQL endpoints.
@@ -362,6 +383,12 @@ func (h *Handler) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 // variables query parameter. This follows the GraphQL-over-HTTP specification.
 func (h *Handler) handleGraphQLGet(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+
+	ident, err := h.resolveIdentity(r)
+	if err != nil {
+		writeTenantAuthError(w, err, start)
+		return
+	}
 
 	query := r.URL.Query().Get("query")
 	if query == "" {
@@ -388,13 +415,19 @@ func (h *Handler) handleGraphQLGet(w http.ResponseWriter, r *http.Request) {
 		Variables:     queryInfo.RequestVariables,
 	})
 
-	h.evaluateAndForward(w, r, forwardBody, queryInfo, start)
+	h.evaluateAndForward(w, r, forwardBody, queryInfo, ident, start)
 }
 
 // handleGraphQLBatch handles batch GraphQL requests (JSON array of query objects).
 // Each query is parsed and evaluated independently. If ANY query is blocked by
 // OPA, the entire batch is rejected.
 func (h *Handler) handleGraphQLBatch(w http.ResponseWriter, r *http.Request, bodyBytes []byte, start time.Time) {
+	ident, err := h.resolveIdentity(r)
+	if err != nil {
+		writeTenantAuthError(w, err, start)
+		return
+	}
+
 	var batch batchGraphQLBody
 	if err := json.Unmarshal(bodyBytes, &batch); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error": %q}`, sanitizeError("json")), http.StatusBadRequest)
@@ -418,7 +451,6 @@ func (h *Handler) handleGraphQLBatch(w http.ResponseWriter, r *http.Request, bod
 
 	// Tenant identity must apply to every item, exactly as it does to a single
 	// request: otherwise the array envelope sidesteps all per-tenant rules.
-	ident := h.resolveIdentity(r)
 
 	// Evaluate each query in the batch
 	firstOpType := "unknown"
@@ -438,8 +470,7 @@ func (h *Handler) handleGraphQLBatch(w http.ResponseWriter, r *http.Request, bod
 			metrics.RecordRequest("error", "unknown", time.Since(start))
 			return
 		}
-		queryInfo.TenantID = ident.TenantID
-		queryInfo.TenantIdentitySource = string(ident.Source)
+		applyIdentity(queryInfo, ident)
 		if len(req.Variables) > 0 {
 			queryInfo.RequestVariables = req.Variables
 		}
@@ -475,9 +506,8 @@ func (h *Handler) handleGraphQLBatch(w http.ResponseWriter, r *http.Request, bod
 }
 
 // evaluateAndForward evaluates a single query and forwards it upstream if allowed.
-func (h *Handler) evaluateAndForward(w http.ResponseWriter, r *http.Request, bodyBytes []byte, queryInfo *parser.QueryInfo, start time.Time) {
-	// Establish tenant identity from the configured resolver.
-	h.applyTenant(r, queryInfo)
+func (h *Handler) evaluateAndForward(w http.ResponseWriter, r *http.Request, bodyBytes []byte, queryInfo *parser.QueryInfo, ident tenant.Identity, start time.Time) {
+	applyIdentity(queryInfo, ident)
 
 	metrics.RecordRuleEval(fmt.Sprintf("op_%s", queryInfo.OperationType))
 

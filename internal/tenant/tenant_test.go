@@ -13,7 +13,10 @@ func TestHeaderResolver_Present(t *testing.T) {
 	req := httptest.NewRequest("POST", "/graphql", nil)
 	req.Header.Set("X-API-Key", "acme_abc_secret")
 
-	id := HeaderResolver{}.Resolve(req)
+	id, err := HeaderResolver{}.Resolve(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if id.TenantID != "acme_abc" {
 		t.Errorf("tenant = %q, want %q", id.TenantID, "acme_abc")
 	}
@@ -24,7 +27,10 @@ func TestHeaderResolver_Present(t *testing.T) {
 
 func TestHeaderResolver_Absent(t *testing.T) {
 	req := httptest.NewRequest("POST", "/graphql", nil)
-	id := HeaderResolver{}.Resolve(req)
+	id, err := HeaderResolver{}.Resolve(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if id.TenantID != "" {
 		t.Errorf("tenant = %q, want empty", id.TenantID)
 	}
@@ -38,8 +44,12 @@ func TestHeaderResolver_DuplicateHeaderUsesFirst(t *testing.T) {
 	req.Header.Add("X-API-Key", "first_secret")
 	req.Header.Add("X-API-Key", "second_secret")
 
-	if got := (HeaderResolver{}).Resolve(req).TenantID; got != "first" {
-		t.Errorf("tenant = %q, want %q (Header.Get semantics, same value the upstream sees last)", got, "first")
+	id, err := (HeaderResolver{}).Resolve(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id.TenantID != "first" {
+		t.Errorf("tenant = %q, want %q (Header.Get semantics)", id.TenantID, "first")
 	}
 }
 
@@ -65,7 +75,7 @@ func TestExtractTenantID(t *testing.T) {
 // unverified header resolver.
 func TestResolverFor_Modes(t *testing.T) {
 	for _, mode := range []string{"header", ""} {
-		r, err := ResolverFor(mode)
+		r, err := ResolverFor(mode, Options{})
 		if err != nil {
 			t.Errorf("ResolverFor(%q) returned error: %v", mode, err)
 			continue
@@ -74,9 +84,12 @@ func TestResolverFor_Modes(t *testing.T) {
 			t.Errorf("ResolverFor(%q) returned %T, want HeaderResolver", mode, r)
 		}
 	}
-	for _, mode := range []string{"hmac", "jwt", "mtls", "bogus"} {
-		if _, err := ResolverFor(mode); err == nil {
+	for _, mode := range []string{"jwt", "mtls", "bogus"} {
+		if _, err := ResolverFor(mode, Options{Secrets: []string{testSecret}}); err == nil {
 			t.Errorf("ResolverFor(%q) accepted an unimplemented mode — startup must fail closed", mode)
 		}
+	}
+	if _, err := ResolverFor("hmac", Options{Secrets: []string{testSecret}}); err != nil {
+		t.Errorf("ResolverFor(hmac) rejected a valid secret: %v", err)
 	}
 }

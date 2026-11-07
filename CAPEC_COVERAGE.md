@@ -476,10 +476,27 @@ which configuration set measured its request.
 |---|---|---|---|---|
 | R95 | Unverified tenant identity selects a policy set | Trusted-identifier exploitation | Identity provenance (`tenant_identity_source`) exported to policy; unregistered tenants refused once any tenant is registered; `require_verified_tenant` assurance gate; per-identity, bounded decision cache | internal/tenant/tenant_test.go, internal/proxy/attack_round9_test.go, cmd/server/attack_round9_test.go, internal/opa/tenant_identity_test.go, opa-policies/graphql_test.rego |
 
-**Scope note:** this round makes the trust boundary explicit and closes the
-silent fall-through. It does not yet *verify* identity — `header` mode is an
-assertion for deployments behind an authenticating gateway, and requesting an
-unimplemented verified mode fails at startup. Cryptographic modes (HMAC signed
-keys, JWT/JWKS, mTLS) are Phase 2 work behind the same `tenant.Resolver`
-interface, with the rejection of unverified identities already enforceable via
-`require_verified_tenant`.
+**Scope note:** Phase 1 makes the trust boundary explicit and closes the silent
+fall-through. Phase 2 adds cryptographic verification (below); JWT/JWKS and
+mTLS remain planned behind the same `tenant.Resolver` interface.
+
+## Round 10 (Phase 2): HMAC-Signed Tenant Keys
+
+CAPEC-21 — *Exploitation of Trusted Identifiers* (verified-identity half). A
+tenant ID still selected a policy set, so an unsigned header could name any
+registered tenant. Keys are now minted and signed by the firewall itself.
+
+| ID | Vector | Class | Control | Test file |
+|---|---|---|---|---|
+| R96 | Forged, unsigned, expired or malformed tenant key | Trusted-identifier exploitation | `v1.<payload>.<MAC>` HMAC-SHA256 over a version-prefixed payload; MAC verified *before* the payload is decoded; constant-time comparison across all secrets; secret rotation with no downtime; `401` before policy evaluation; unkeyed-hash "signature" rejected | internal/tenant/hmac_test.go, internal/proxy/attack_round10_test.go |
+
+Additional properties covered: keys are minted by the binary
+(`--tenant-key-issue`), secrets may come from the environment to stay out of the
+process list, secrets shorter than 16 bytes are refused at startup, `exp` is
+optional, and a 60-second clock skew is tolerated during expiry checks.
+Migration is staged: `--tenant-allow-unsigned` accepts unsigned keys but keeps
+them labelled `source="header"`, so `require_verified_tenant` refuses them while
+operators watch `tenant_identity_total{source="header"}` fall to zero.
+
+**Residual scope:** JWT/JWKS and mTLS modes, and revocation of a single issued
+key (today revocation is per-secret rotation or short `--tenant-key-ttl`).

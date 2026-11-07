@@ -16,7 +16,7 @@ import (
 // the configured resolver rather than parsing the header itself.
 type stubResolver struct{ id tenant.Identity }
 
-func (s stubResolver) Resolve(*http.Request) tenant.Identity { return s.id }
+func (s stubResolver) Resolve(*http.Request) (tenant.Identity, error) { return s.id, nil }
 
 // ── R95: tenant identity comes from the configured resolver ─────────────────
 // The handler must not re-derive tenancy from the raw header once a resolver is

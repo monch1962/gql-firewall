@@ -30,9 +30,9 @@ gql-firewall's OPA Rego policies (49 tests) cover 13 attack categories, with 127
 | 10 | **Fragment Explosion** — `... on Type` across many unions | `max_fragment_spreads: 15` | ✅ |
 | 11 | **Query Cost** — Cheap-to-parse, expensive-to-execute queries | `depth × field_count ≤ 50` budget | ✅ |
 | 12 | **Persisted Query Bypass** — Dynamic queries in PQ-only mode | `require_persisted_queries` + hash validation | ✅ |
-| 13 | **Tenant Identity Spoofing** — forged tenant ID selects a policy set | Unregistered tenants refused; `require_verified_tenant` assurance gate | ✅ |
+| 13 | **Tenant Identity Spoofing** — forged tenant ID selects a policy set | HMAC-signed keys; unregistered tenants refused; `require_verified_tenant` gate | ✅ |
 
-### Red-Team Verified Transport Protection (127 attack simulation tests)
+### Red-Team Verified Transport Protection (134 attack simulation tests)
 
 All verified with TDD — tests written first, then defenses implemented.
 
@@ -128,6 +128,7 @@ All verified with TDD — tests written first, then defenses implemented.
 | **R93** | **Unbounded parse concurrency** | Bounded parse pool, `503` when saturated | ✅ |
 | **R94** | **OPA outage disables every rule** | `--opa-fail-closed` now defaults to `true` | ✅ |
 | **R95** | **Unverified tenant identity** (`X-API-Key` prefix) | Identity source labelled; unregistered tenants refused; `require_verified_tenant` policy knob | ✅ |
+| **R96** | **Forged, unsigned or expired tenant key** | HMAC-signed keys verified before use; `401` on failure; rotation without downtime | ✅ |
 
 ## CLI Flags
 
@@ -155,8 +156,12 @@ All verified with TDD — tests written first, then defenses implemented.
 | `--max-batch-size` | `100` | Maximum queries accepted in one batch request |
 | `--max-concurrent-parses` | `64` | Maximum concurrent query parses (≤ 0 disables the cap) |
 | `--allowed-operation-names` | `""` | Comma-separated list of allowed operation names<br>(blocks unnamed + unlisted when non-empty) |
-| `--tenant-mode` | `header` | Tenant identity mode (`header` = unverified; verified modes planned) |
+| `--tenant-mode` | `header` | Tenant identity mode: `header` (unverified) or `hmac` (signed keys) |
 | `--unknown-tenant` | `deny` | Reject unregistered tenant IDs (`deny` applies only when tenants are registered) |
+| `--tenant-key-secret` | `""` | HMAC secret(s), comma-separated newest first (or env `GQL_TENANT_KEY_SECRET`) |
+| `--tenant-allow-unsigned` | `false` | Accept unsigned keys in hmac mode during migration (still labelled unverified) |
+| `--tenant-key-issue` | `""` | Issue a signed key for this tenant ID, print it and exit |
+| `--tenant-key-ttl` | `720h` | Lifetime for `--tenant-key-issue` (0 = no expiry) |
 | `--opa-cache-max-entries` | `10000` | Maximum cached OPA decisions (0 = default, negative = unlimited) |
 
 ### Upgrade notes (0.5.0)
@@ -189,8 +194,22 @@ behaviour change; the previous behaviour remains available via the noted flag.
   10 000). Use a negative value for the previous unbounded behaviour.
 - **This release does not yet verify tenant identity.** `header` mode is an
   assertion for deployments behind an authenticating gateway; requesting an
-  unimplemented verified mode fails at startup. Verified modes (`hmac`, `jwt`,
-  `mtls`) are planned for 0.6.0.
+  unimplemented verified mode fails at startup. `hmac` arrived in 0.6.0;
+  `jwt` and `mtls` remain planned.
+
+### Upgrade notes (0.6.0)
+
+- **Verified tenant identity is available** with `--tenant-mode=hmac` and
+  `--tenant-key-secret` (or `GQL_TENANT_KEY_SECRET`). Keys are minted with
+  `--tenant-key-issue`; see [docs/tenant-identity.md](docs/tenant-identity.md)
+  for the format and the three-stage migration from header mode.
+- **Unverifiable credentials now return `401`** before policy evaluation.
+  Unsigned keys in hmac mode are rejected unless `--tenant-allow-unsigned` is
+  set for migration (they stay labelled `source="header"`, so
+  `require_verified_tenant` still refuses them).
+- **`--tenant-key-issue` exits after printing a key.** It does not start the
+  server; combine it with `--tenant-key-ttl` to control lifetime.
+- No change for header mode or for deployments with no tenants registered.
 
 ### Security Features
 
@@ -227,7 +246,19 @@ firewall is explicit about whether that identity is **proven** or merely
 | Mode | Trust | Use when |
 |---|---|---|
 | `header` (default) | Asserted — parsed from `X-API-Key`, not verified | A trusted gateway authenticates the caller and strips inbound `X-API-Key` |
-| `hmac` / `jwt` / `mtls` | Verified | Planned for 0.6.0; requesting an unavailable mode fails at startup |
+| `hmac` | Verified — HMAC-SHA256 signature checked against a configured secret | Any deployment with tenant-specific policy and no mTLS/JWT infrastructure |
+| `jwt` / `mtls` | Verified | Planned; requesting an unavailable mode fails at startup |
+
+Issue and rotate keys with the binary itself:
+
+```bash
+export GQL_TENANT_KEY_SECRET=$(openssl rand -hex 32)
+./gql-firewall --tenant-key-issue acme --tenant-key-ttl 720h
+./gql-firewall --tenant-mode=hmac --tenant-key-secret "$NEW,$OLD" ...
+```
+
+For the key format, the three-stage migration from header mode, rotation and
+response semantics, see [docs/tenant-identity.md](docs/tenant-identity.md).
 
 Rules of the model:
 
@@ -533,8 +564,8 @@ gql-firewall/
 │   ├── parser/                    # GraphQL query analysis (45 tests, including Rust compat)
 │   ├── opa/                       # OPA evaluator: sidecar, embedded, data store, input builder (63 tests)
 │   ├── metrics/                   # Prometheus instrumentation (11 tests)
-│   ├── proxy/                     # HTTP reverse proxy (152 tests, incl. rounds 1–9)
-│   ├── tenant/                    # Tenant identity resolvers (5 tests; verified modes planned)
+│   ├── proxy/                     # HTTP reverse proxy (159 tests, incl. rounds 1–10)
+│   ├── tenant/                    # Tenant identity resolvers (20 tests: header + HMAC)
 │   ├── ratelimit/                 # Token-bucket rate limiter (7 tests)
 │   ├── testutil/                  # Shared test helpers  
 │   └── integration/               # End-to-end pipeline tests (20 tests, including e2e HTTP tests)
@@ -549,10 +580,10 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           405 test functions (477 including subtests)
-              server(46), tenant(5), parser(101), proxy(152), integration(20), opa(63), metrics(11), ratelimit(7)
+Go:           427 test functions (499 including subtests)
+              server(46), tenant(20), parser(101), proxy(159), integration(20), opa(63), metrics(11), ratelimit(7)
 OPA/Rego:     49 tests   — 13 attack categories, edge cases, combined rules, tenant assurance
-Total:        454 test functions (526 including subtests) — all passing
+Total:        476 test functions (548 including subtests) — all passing
 ```
 
 ```bash
