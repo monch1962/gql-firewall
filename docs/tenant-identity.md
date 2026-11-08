@@ -43,6 +43,23 @@ seconds and is omitted for non-expiring keys. Properties:
   is tried without early exit.
 - Secrets shorter than 16 bytes are refused at startup.
 
+### Credential header rules
+
+`X-API-Key` must appear **exactly once** with a canonical value. The firewall
+reads the header's first value; a folding proxy or the upstream may read the
+last, so accepting ambiguity would let a client have the firewall police tenant
+A while the backend authenticates tenant B. These are refused with `401`:
+
+- more than one `X-API-Key` header line;
+- a comma-joined value (`acme_secret,bob_secret`), the shape a folding proxy
+  produces;
+- any value longer than 4096 bytes, checked *before* base64 decoding and MAC
+  work so an attacker cannot make the firewall hash megabytes per request;
+- whitespace, control characters or non-ASCII bytes;
+- an extracted tenant ID that does not match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`.
+  This applies to signed claims too: a valid MAC only proves the issuer signed
+  the payload, not that the payload carries a registrable tenant ID.
+
 ## Issuing keys
 
 ```bash

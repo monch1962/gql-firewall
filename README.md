@@ -129,6 +129,7 @@ All verified with TDD — tests written first, then defenses implemented.
 | **R94** | **OPA outage disables every rule** | `--opa-fail-closed` now defaults to `true` | ✅ |
 | **R95** | **Unverified tenant identity** (`X-API-Key` prefix) | Identity source labelled; unregistered tenants refused; `require_verified_tenant` policy knob | ✅ |
 | **R96** | **Forged, unsigned or expired tenant key** | HMAC-signed keys verified before use; `401` on failure; rotation without downtime | ✅ |
+| **R97** | **Ambiguous `X-API-Key` headers split identity** (duplicate/folded values, oversized keys, signed claims with hostile tenant IDs) | Exactly one canonical credential accepted; length-capped before MAC work; verified claims pattern-validated | ✅ |
 
 ## CLI Flags
 
@@ -306,8 +307,8 @@ Rules of the model:
 - **OPA decision caching** — Avoids redundant OPA calls for repeated query patterns. ~200µs vs ~2ms RPC on cache hit.
 
 ### Security
-- **140 attack vectors covered** (45 OPA Rego + 95 red-team HTTP transport)
-- **Red-team verified** — 95 attack simulation tests across the Go proxy. Real vulnerabilities found and patched across 7 rounds.
+- **150 attack vectors covered** (45 OPA Rego + 105 red-team HTTP transport)
+- **Red-team verified** — 105 attack simulation tests across the Go proxy. Real vulnerabilities found and patched across 7 rounds.
 - **Deny-override model** — requests pass by default, blocked only by matching deny rules (safe for phased rollout)
 - **Sensitive field blocking** — SSN, passwords, credit cards, API keys, secrets
 - **Introspection blocking** — direct + nested paths

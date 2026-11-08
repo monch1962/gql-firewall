@@ -1,6 +1,7 @@
 package tenant
 
 import (
+	"errors"
 	"net/http/httptest"
 	"testing"
 )
@@ -39,17 +40,20 @@ func TestHeaderResolver_Absent(t *testing.T) {
 	}
 }
 
-func TestHeaderResolver_DuplicateHeaderUsesFirst(t *testing.T) {
+// Duplicate credential headers are ambiguous: this test previously asserted
+// Header.Get took the first value, which is exactly the identity-split vector
+// (firewall polices the first, a folding proxy or upstream reads the last).
+func TestHeaderResolver_DuplicateHeaderRejected(t *testing.T) {
 	req := httptest.NewRequest("POST", "/graphql", nil)
 	req.Header.Add("X-API-Key", "first_secret")
 	req.Header.Add("X-API-Key", "second_secret")
 
 	id, err := (HeaderResolver{}).Resolve(req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatalf("duplicate X-API-Key accepted as tenant %q; upstream may read the other value", id.TenantID)
 	}
-	if id.TenantID != "first" {
-		t.Errorf("tenant = %q, want %q (Header.Get semantics)", id.TenantID, "first")
+	if !errors.Is(err, ErrInvalidKey) {
+		t.Errorf("error = %v, want ErrInvalidKey", err)
 	}
 }
 

@@ -33,6 +33,11 @@ var (
 	ErrExpiredKey = errors.New("expired tenant key")
 )
 
+// MaxCredentialLen bounds the X-API-Key header before any decoding or MAC work.
+// A legitimate signed key is ~120 bytes; anything far larger is an attempt to
+// make the firewall hash attacker-chosen material on every request.
+const MaxCredentialLen = 4096
+
 // Identity is the tenant identity established for a single request.
 type Identity struct {
 	TenantID string
@@ -58,6 +63,43 @@ type Options struct {
 	Now func() time.Time
 }
 
+// credential returns the request's single X-API-Key value, or "" when absent.
+//
+// Repeated headers (or one comma-joined value) are refused: Header.Get returns
+// only the first value, while a folding proxy or the upstream may read the last
+// one. Accepting ambiguity lets a client have the firewall police tenant A
+// while the backend authenticates tenant B (CAPEC-21, trusted identifiers).
+// The value is also length-bounded and character-checked before any decoding or
+// MAC work, so an attacker cannot make the firewall hash attacker-chosen
+// material on every request.
+func credential(r *http.Request) (string, error) {
+	values := r.Header.Values("X-API-Key")
+	if len(values) == 0 {
+		return "", nil
+	}
+	if len(values) > 1 {
+		return "", fmt.Errorf("%w: multiple X-API-Key headers are ambiguous", ErrInvalidKey)
+	}
+	key := values[0]
+	if len(key) > MaxCredentialLen {
+		return "", fmt.Errorf("%w: credential exceeds %d bytes", ErrInvalidKey, MaxCredentialLen)
+	}
+	for i := 0; i < len(key); i++ {
+		if c := key[i]; c <= ' ' || c > '~' || c == ',' {
+			return "", fmt.Errorf("%w: credential contains invalid characters", ErrInvalidKey)
+		}
+	}
+	return key, nil
+}
+
+// canonicalTenantID reports whether id is a well-formed tenant identifier.
+// Every tenant ID reaches logs and policy input, and only canonical IDs can be
+// registered, so a non-canonical claim would otherwise silently fall through
+// to the global parameter set.
+func canonicalTenantID(id string) bool {
+	return tenantIDPattern.MatchString(id)
+}
+
 // HeaderResolver derives the tenant from the X-API-Key header without
 // verification. It is only appropriate when a trusted gateway has already
 // authenticated the caller and stripped any inbound X-API-Key header; it is
@@ -66,11 +108,18 @@ type HeaderResolver struct{}
 
 // Resolve implements Resolver.
 func (HeaderResolver) Resolve(r *http.Request) (Identity, error) {
-	key := r.Header.Get("X-API-Key")
+	key, err := credential(r)
+	if err != nil {
+		return Identity{Source: SourceHeader}, err
+	}
 	if key == "" {
 		return Identity{Source: SourceNone}, nil
 	}
-	return Identity{TenantID: ExtractTenantID(key), Source: SourceHeader}, nil
+	id := ExtractTenantID(key)
+	if !canonicalTenantID(id) {
+		return Identity{Source: SourceHeader}, fmt.Errorf("%w: tenant ID is not a valid identifier", ErrInvalidKey)
+	}
+	return Identity{TenantID: id, Source: SourceHeader}, nil
 }
 
 // ResolverFor returns the resolver for a configured mode name. Unimplemented

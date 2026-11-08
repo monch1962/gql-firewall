@@ -67,13 +67,20 @@ func newHMACResolver(opts Options) (Resolver, error) {
 // was built with AllowUnsigned (migration), in which case they are accepted but
 // stay labelled SourceHeader so policy can still refuse them.
 func (h *HMACResolver) Resolve(r *http.Request) (Identity, error) {
-	key := r.Header.Get("X-API-Key")
+	key, err := credential(r)
+	if err != nil {
+		return Identity{Source: SourceHeader}, err
+	}
 	if key == "" {
 		return Identity{Source: SourceNone}, nil
 	}
 	if !strings.HasPrefix(key, keyVersion+".") {
 		if h.allowUnsigned {
-			return Identity{TenantID: ExtractTenantID(key), Source: SourceHeader}, nil
+			id := ExtractTenantID(key)
+			if !canonicalTenantID(id) {
+				return Identity{Source: SourceHeader}, fmt.Errorf("%w: tenant ID is not a valid identifier", ErrInvalidKey)
+			}
+			return Identity{TenantID: id, Source: SourceHeader}, nil
 		}
 		return Identity{Source: SourceHeader}, fmt.Errorf("%w: key is not signed", ErrInvalidKey)
 	}
@@ -123,6 +130,12 @@ func (h *HMACResolver) verify(key string) (*claims, error) {
 	}
 	if c.TenantID == "" {
 		return nil, fmt.Errorf("%w: missing tenant", ErrInvalidKey)
+	}
+	// A shared secret can be held by other issuers (rotation scripts, sibling
+	// services). Even a valid MAC must not smuggle a tenant ID that cannot be
+	// registered, because the value reaches logs and policy input verbatim.
+	if !canonicalTenantID(c.TenantID) {
+		return nil, fmt.Errorf("%w: tenant ID is not a valid identifier", ErrInvalidKey)
 	}
 	if c.ExpiresAt > 0 && h.now().After(time.Unix(c.ExpiresAt, 0).Add(h.skew)) {
 		return nil, fmt.Errorf("%w: expired at %s", ErrExpiredKey,

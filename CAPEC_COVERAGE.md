@@ -500,3 +500,20 @@ operators watch `tenant_identity_total{source="header"}` fall to zero.
 
 **Residual scope:** JWT/JWKS and mTLS modes, and revocation of a single issued
 key (today revocation is per-secret rotation or short `--tenant-key-ttl`).
+
+## Round 11 (Phase 2): Credential Header Integrity
+
+CAPEC-21 — *Exploitation of Trusted Identifiers* (credential-selection half).
+A verified key only helps if the firewall and the upstream agree on *which*
+credential was presented. `Header.Get` reads the first value; a folding proxy
+or the backend may read the last, so duplicates let a client have the firewall
+police one tenant while the backend authenticates another. Separately, a
+correctly signed claim was trusted to carry any bytes as its tenant ID.
+
+| ID | Vector | Class | Control | Test file |
+|---|---|---|---|---|
+| R97 | Ambiguous/oversized credential splits identity between firewall and upstream | Trusted-identifier exploitation, resource exhaustion | Exactly one `X-API-Key` value (duplicate headers and comma-joined values refused); 4096-byte cap enforced before base64/MAC work; whitespace/control/non-ASCII rejected; extracted *and* verified tenant IDs must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`; all failures are `401` with a generic body | internal/tenant/attack_round11_test.go, internal/proxy/attack_round11_test.go |
+
+Previously `TestHeaderResolver_DuplicateHeaderUsesFirst` asserted the
+`Header.Get` behaviour (first value wins), which encoded the vulnerable path;
+it now asserts rejection.
