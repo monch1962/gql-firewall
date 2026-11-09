@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.23-alpine AS builder
+FROM golang:1.26.10-alpine3.24 AS builder
 
 RUN apk add --no-cache git ca-certificates
 
@@ -12,7 +12,7 @@ COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o gql-firewall ./cmd/server/
 
 # Runtime stage
-FROM alpine:3.20
+FROM alpine:3.24
 
 RUN apk add --no-cache ca-certificates tzdata
 

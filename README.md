@@ -327,7 +327,7 @@ Rules of the model:
 ## Quick Start
 
 ### Prerequisites
-- Go 1.23+ (for building)
+- Go 1.26.10+ (for building — the toolchain is pinned in `go.mod`; the go1.25 line is end-of-life and carries reachable `net/http` DoS advisories)
 - OPA 1.0+ (optional, for policy evaluation — `opa test opa-policies/` validates)
 
 ### Install & Run
@@ -565,11 +565,11 @@ gql-firewall/
 │   ├── parser/                    # GraphQL query analysis (45 tests, including Rust compat)
 │   ├── opa/                       # OPA evaluator: sidecar, embedded, data store, input builder (63 tests)
 │   ├── metrics/                   # Prometheus instrumentation (11 tests)
-│   ├── proxy/                     # HTTP reverse proxy (159 tests, incl. rounds 1–10)
-│   ├── tenant/                    # Tenant identity resolvers (20 tests: header + HMAC)
+│   ├── proxy/                     # HTTP reverse proxy (163 tests, incl. rounds 1–11)
+│   ├── tenant/                    # Tenant identity resolvers (26 tests: header + HMAC)
 │   ├── ratelimit/                 # Token-bucket rate limiter (7 tests)
 │   ├── testutil/                  # Shared test helpers  
-│   └── integration/               # End-to-end pipeline tests (20 tests, including e2e HTTP tests)
+│   └── integration/               # End-to-end pipeline tests (22 tests, including e2e HTTP tests)
 ├── opa-policies/                  # OPA Rego policy templates (49 tests)
 │   ├── graphql.rego              # 13 attack categories, parameterized via input.params
 │   └── graphql_test.rego         # 49 policy tests
@@ -581,11 +581,20 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           427 test functions (499 including subtests)
-              server(46), tenant(20), parser(101), proxy(159), integration(20), opa(63), metrics(11), ratelimit(7)
+Go:           439 test functions (517 including subtests)
+              server(46), tenant(26), parser(101), proxy(163), integration(22), opa(63), metrics(11), ratelimit(7)
 OPA/Rego:     49 tests   — 13 attack categories, edge cases, combined rules, tenant assurance
-Total:        476 test functions (548 including subtests) — all passing
+Total:        488 test functions (566 including subtests) — all passing
 ```
+
+### Dependency & toolchain hygiene
+
+`govulncheck ./...` reports **0 vulnerabilities affecting this codebase** (0 in imported
+packages). Two regression guards (`internal/integration/toolchain_floor_test.go`) fail the
+build if `runtime.Version()` or the `go.mod` `toolchain` pin drops below `go1.26.10`, so a
+downgrade cannot silently reintroduce the fixed stdlib vectors (HPACK encoder race crash,
+HTTP/2 trailer memory exhaustion, MIME header memory-limit bypass, CONNECT
+desynchronization, x509 trust).
 
 ```bash
 # Run everything
