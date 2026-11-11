@@ -10,23 +10,25 @@ import (
 )
 
 // Not in CAPEC: toolchain/dependency downgrade that silently reintroduces
-// fixed standard-library denial-of-service vectors (GO-2026-6603 … GO-2026-6617).
+// fixed standard-library denial-of-service vectors (GO-2026-6603 … GO-2026-6859).
 //
 // The sidecar terminates HTTP/1.1 and HTTP/2 and proxies to the upstream, so a
 // stdlib net/http regression is a first-class attack surface for this project:
 // the go1.25 line is out of support and carries 10 reachable advisories
 // (HPACK encoder race crash, HTTP/2 trailer memory exhaustion, MIME header
 // memory-limit bypass, CONNECT desynchronization, and related flow-control
-// abuse). Pinning the build back to a vulnerable toolchain would silently
-// reopen all of them, so the floor is asserted in CI rather than left to
-// code review.
+// abuse). GO-2026-6859 (go1.26.11) adds another: a data race in the
+// MaxBytesReader header path lets a client crash the HTTP/1 server — the exact
+// primitive this proxy relies on to bound request bodies. Pinning the build
+// back to a vulnerable toolchain would silently reopen all of them, so the
+// floor is asserted in CI rather than left to code review.
 func TestBuild_ToolchainAtLeastNetHTTPSecurityFloor(t *testing.T) {
-	// Lowest release that fixes every stdlib advisory govulncheck reported
-	// against the previously pinned go1.25.13: go1.26.10 (x509, GO-2026-6809).
+	// Lowest release that fixes every stdlib advisory govulncheck reported:
+	// go1.26.11 (net/http MaxBytesReader header race, GO-2026-6859).
 	const (
 		floorMajor = 1
 		floorMinor = 26
-		floorPatch = 10
+		floorPatch = 11
 	)
 
 	got := runtime.Version()
@@ -51,7 +53,7 @@ func TestBuild_ToolchainAtLeastNetHTTPSecurityFloor(t *testing.T) {
 // contract: the local runtime can be modern while go.mod still pins a
 // vulnerable toolchain, which would downgrade CI and container builds.
 func TestBuild_GoModToolchainPinnedToSecurityFloor(t *testing.T) {
-	const floor = "go1.26.10"
+	const floor = "go1.26.11"
 
 	raw, err := os.ReadFile("../../go.mod")
 	if err != nil {

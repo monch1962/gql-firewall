@@ -591,10 +591,10 @@ Total:        488 test functions (566 including subtests) — all passing
 
 `govulncheck ./...` reports **0 vulnerabilities affecting this codebase** (0 in imported
 packages). Two regression guards (`internal/integration/toolchain_floor_test.go`) fail the
-build if `runtime.Version()` or the `go.mod` `toolchain` pin drops below `go1.26.10`, so a
+build if `runtime.Version()` or the `go.mod` `toolchain` pin drops below `go1.26.11`, so a
 downgrade cannot silently reintroduce the fixed stdlib vectors (HPACK encoder race crash,
 HTTP/2 trailer memory exhaustion, MIME header memory-limit bypass, CONNECT
-desynchronization, x509 trust).
+desynchronization, x509 trust, MaxBytesReader header-race crash).
 
 ```bash
 # Run everything
