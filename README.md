@@ -130,6 +130,7 @@ All verified with TDD — tests written first, then defenses implemented.
 | **R95** | **Unverified tenant identity** (`X-API-Key` prefix) | Identity source labelled; unregistered tenants refused; `require_verified_tenant` policy knob | ✅ |
 | **R96** | **Forged, unsigned or expired tenant key** | HMAC-signed keys verified before use; `401` on failure; rotation without downtime | ✅ |
 | **R97** | **Ambiguous `X-API-Key` headers split identity** (duplicate/folded values, oversized keys, signed claims with hostile tenant IDs) | Exactly one canonical credential accepted; length-capped before MAC work; verified claims pattern-validated | ✅ |
+| **R98** | **Parser nesting bomb runs before policy** (300KB of `{a{a{…` burned 2.4s of CPU; ~900KB got the sidecar OOM-killed before any Rego rule saw the operation) | Pre-parse linear nesting scan (`parser.MaxQueryNestingDepth`, 1024 levels) that mirrors gqlparser's lexer; `400` without touching the upstream or OPA | ✅ |
 
 ## CLI Flags
 
@@ -223,6 +224,7 @@ behaviour change; the previous behaviour remains available via the noted flag.
 | **Body size limit** | `--max-body-mb` | OOM via oversized requests (H-6) |
 | **Batch size limit** | `--max-batch-size` | Amplification via batch arrays |
 | **Bounded parse pool** | `--max-concurrent-parses` | Goroutine / CPU exhaustion |
+| **Parser nesting cap** | Built-in (`parser.MaxQueryNestingDepth` = 1024) | CPU / OOM exhaustion from nesting bombs that never reach policy |
 | **Rate-limit key integrity** | `--trust-proxy-headers` (off) | Throttling bypass via forged headers |
 | **Rate-limiter memory cap** | Built-in (`MaxKeys`) | Bucket-map exhaustion |
 | **Admin bind guard** | `--admin` (loopback) / `--admin-token` | Unauthenticated rule rewrite |
@@ -307,8 +309,8 @@ Rules of the model:
 - **OPA decision caching** — Avoids redundant OPA calls for repeated query patterns. ~200µs vs ~2ms RPC on cache hit.
 
 ### Security
-- **150 attack vectors covered** (45 OPA Rego + 105 red-team HTTP transport)
-- **Red-team verified** — 105 attack simulation tests across the Go proxy. Real vulnerabilities found and patched across 7 rounds.
+- **151 attack vectors covered** (45 OPA Rego + 106 red-team HTTP transport)
+- **Red-team verified** — 157 `TestAttack_*` simulation tests across the Go packages (parser 14, proxy 121, tenant 6, server 15, ratelimit 1) plus 49 Rego policy tests. Real vulnerabilities found and patched across 12 rounds.
 - **Deny-override model** — requests pass by default, blocked only by matching deny rules (safe for phased rollout)
 - **Sensitive field blocking** — SSN, passwords, credit cards, API keys, secrets
 - **Introspection blocking** — direct + nested paths
@@ -581,10 +583,10 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           439 test functions (517 including subtests)
-              server(46), tenant(26), parser(101), proxy(163), integration(22), opa(63), metrics(11), ratelimit(7)
+Go:           452 test functions (535 including subtests)
+              server(46), tenant(26), parser(113), proxy(164), integration(22), opa(63), metrics(11), ratelimit(7)
 OPA/Rego:     49 tests   — 13 attack categories, edge cases, combined rules, tenant assurance
-Total:        488 test functions (566 including subtests) — all passing
+Total:        501 test functions (584 including subtests) — all passing
 ```
 
 ### Dependency & toolchain hygiene
