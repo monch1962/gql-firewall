@@ -42,8 +42,12 @@ func checkNesting(query string) error {
 	for i := 0; i < n; {
 		switch query[i] {
 		case '#':
-			// Line comment: runs to the end of the line or the document.
-			for i < n && query[i] != '\n' {
+			// Line comment. gqlparser's readComment consumes every byte with
+			// `r > 0x1f || r == '	'` — a lone '\r' (or any other control byte)
+			// ends the comment there, not only '\n'. Scanning to '\n' alone
+			// would swallow the rest of the document on a CR-terminated
+			// comment, hiding a nesting bomb the parser then admits.
+			for i < n && (query[i] > 0x1f || query[i] == '	') {
 				i++
 			}
 
@@ -103,11 +107,12 @@ func skipString(query string, i int) int {
 // index i (the first of the opening `"""`).
 //
 // It mirrors gqlparser's readBlockString: `\"""` is an escape sequence and the
-// literal ends at the very next `"""` — exactly three quotes. Quotes beyond that
-// closing triple are *not* part of the literal; they open a following token.
-// Over-extending the literal is the dangerous direction: everything the scanner
-// thinks is string content is skipped by the nesting check while the parser still
-// descends into it, so the limit could be defeated with nothing but extra quotes.
+// literal is closed by a run of three or more quotes — the lexer consumes the
+// whole run (`s.end += quoteCount`), treating the extra quotes as content. A
+// scanner that stopped at the first `"""` of the run would leave a dangling
+// quote that it then reads as an ordinary string, swallowing the rest of the
+// document while the parser keeps lexing and descending into it. Over-extending
+// the literal is the dangerous direction, so the run must be consumed exactly.
 func skipBlockString(query string, i int) int {
 	n := len(query)
 	i += 3 // opening """
@@ -118,8 +123,16 @@ func skipBlockString(query string, i int) int {
 			i += 4 // escaped triple quote: still inside the literal
 			continue
 		}
-		if query[i] == '"' && i+2 < n && query[i+1] == '"' && query[i+2] == '"' {
-			return i + 3
+		if query[i] == '"' {
+			j := i
+			for j < n && query[j] == '"' {
+				j++
+			}
+			if j-i >= 3 {
+				return j // closing run of >= 3 quotes, consumed whole
+			}
+			i = j // one or two quotes are literal content
+			continue
 		}
 		i++
 	}

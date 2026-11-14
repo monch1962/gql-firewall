@@ -107,20 +107,39 @@ line { """`,
 	}
 
 	for _, in := range cases {
-		l := lexer.New(&ast.Source{Input: in + " TAIL", Name: "t"})
+		full := in + " TAIL"
+		l := lexer.New(&ast.Source{Input: full, Name: "t"})
 		tok, err := l.ReadToken()
 
-		got := skipLiteral(in, 0)
+		got := skipLiteral(full, 0)
 		if err != nil {
 			// Unterminated: the parser rejects the document, so the scan must
 			// simply run to EOF and count nothing it swallowed.
-			if got != len(in) {
-				t.Errorf("%q: unterminated literal, scanner stopped at %d, want %d", in, got, len(in))
+			if got != len(full) {
+				t.Errorf("%q: unterminated literal, scanner stopped at %d, want %d", in, got, len(full))
 			}
 			continue
 		}
-		if want := tok.Pos.End; got != want {
-			t.Errorf("%q: scanner ends literal at %d, lexer at %d (%v)", in, got, want, tok.Kind)
+		// tok.Pos.End is NOT the lexer's consumption for a block string: when the
+		// closing quote run is longer than three quotes, readBlockString reports
+		// firstQuote+3 in the token position while it advances s.end past the whole
+		// run. Comparing against Pos.End therefore certified a scanner that stopped
+		// at the first `"""` of the run — exactly the desync fixed in R99. The real
+		// boundary is where the lexer resumes tokenising, so pin against the start of
+		// the following token instead.
+		next, nerr := l.ReadToken()
+		if nerr != nil {
+			t.Fatalf("%q: reading token after literal: %v", in, nerr)
+		}
+		if next.Kind != lexer.Name || next.Value != "TAIL" {
+			t.Fatalf("%q: expected TAIL after literal, got %v %q", in, next.Kind, next.Value)
+		}
+		want := next.Pos.Start
+		for got < len(full) && full[got] == ' ' {
+			got++
+		}
+		if got != want {
+			t.Errorf("%q: scanner resumes at %d, lexer at %d (%v)", in, got, want, tok.Kind)
 		}
 	}
 }

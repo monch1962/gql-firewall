@@ -131,6 +131,7 @@ All verified with TDD — tests written first, then defenses implemented.
 | **R96** | **Forged, unsigned or expired tenant key** | HMAC-signed keys verified before use; `401` on failure; rotation without downtime | ✅ |
 | **R97** | **Ambiguous `X-API-Key` headers split identity** (duplicate/folded values, oversized keys, signed claims with hostile tenant IDs) | Exactly one canonical credential accepted; length-capped before MAC work; verified claims pattern-validated | ✅ |
 | **R98** | **Parser nesting bomb runs before policy** (300KB of `{a{a{…` burned 2.4s of CPU; ~900KB got the sidecar OOM-killed before any Rego rule saw the operation) | Pre-parse linear nesting scan (`parser.MaxQueryNestingDepth`, 1024 levels) that mirrors gqlparser's lexer; `400` without touching the upstream or OPA | ✅ |
+| **R99** | **Nesting-limit bypass via lexer desync** (`#` comment terminated by a lone `\r` and block strings closed by a 4+ quote run both made the R98 scan swallow text the lexer still parses, so the bomb reached the recursive descent) | Scan ends literals exactly where `readComment`/`readBlockString` do — control bytes end comments, whole quote runs are consumed; differential test pinned to the lexer's next token, not `Pos.End` | ✅ |
 
 ## CLI Flags
 
@@ -309,8 +310,8 @@ Rules of the model:
 - **OPA decision caching** — Avoids redundant OPA calls for repeated query patterns. ~200µs vs ~2ms RPC on cache hit.
 
 ### Security
-- **151 attack vectors covered** (45 OPA Rego + 106 red-team HTTP transport)
-- **Red-team verified** — 157 `TestAttack_*` simulation tests across the Go packages (parser 14, proxy 121, tenant 6, server 15, ratelimit 1) plus 49 Rego policy tests. Real vulnerabilities found and patched across 12 rounds.
+- **153 attack vectors covered** (45 OPA Rego + 108 red-team HTTP transport)
+- **Red-team verified** — 162 `TestAttack_*` simulation tests across the Go packages (parser 18, proxy 122, tenant 6, server 15, ratelimit 1) plus 49 Rego policy tests. Real vulnerabilities found and patched across 13 rounds.
 - **Deny-override model** — requests pass by default, blocked only by matching deny rules (safe for phased rollout)
 - **Sensitive field blocking** — SSN, passwords, credit cards, API keys, secrets
 - **Introspection blocking** — direct + nested paths
@@ -583,10 +584,10 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           452 test functions (535 including subtests)
-              server(46), tenant(26), parser(113), proxy(164), integration(22), opa(63), metrics(11), ratelimit(7)
+Go:           457 test functions (557 including subtests)
+              server(46), tenant(26), parser(117), proxy(165), integration(22), opa(63), metrics(11), ratelimit(7)
 OPA/Rego:     49 tests   — 13 attack categories, edge cases, combined rules, tenant assurance
-Total:        501 test functions (584 including subtests) — all passing
+Total:        506 test functions (606 including subtests) — all passing
 ```
 
 ### Dependency & toolchain hygiene
