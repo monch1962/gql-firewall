@@ -265,17 +265,23 @@ func (h *Handler) SetParseConcurrency(n int) {
 
 // parse runs the parser inside the bounded worker pool. A saturated pool is
 // reported rather than queued, so load cannot be amplified by waiting.
+//
+// The slot is handed back by the parse goroutine when the work has actually
+// finished — never by this caller. A timeout abandons the wait but not the
+// work: refunding the slot here would let a stream of slow queries push the
+// number of live parses past the cap while their abandoned goroutines keep
+// allocating and burning CPU, which is precisely the amplifier the cap exists
+// to cut (CAPEC-130).
 func (h *Handler) parse(query string) (*parser.QueryInfo, error) {
 	if h.parseSem == nil {
 		return parseQueryWithTimeout(query, h.ParseTimeout)
 	}
 	select {
 	case h.parseSem <- struct{}{}:
-		defer func() { <-h.parseSem }()
-		return parseQueryWithTimeout(query, h.ParseTimeout)
 	default:
 		return nil, errParseBusy
 	}
+	return parseQueryWithTimeoutOnDone(query, h.ParseTimeout, func() { <-h.parseSem })
 }
 
 // writeParseError responds to a parse failure, distinguishing pool saturation
@@ -542,12 +548,24 @@ func (h *Handler) evaluateAndForward(w http.ResponseWriter, r *http.Request, bod
 // parseQueryWithTimeout runs GraphQL parsing with a timeout to prevent
 // CPU exhaustion from crafted queries (H3 fix).
 func parseQueryWithTimeout(query string, timeout time.Duration) (*parser.QueryInfo, error) {
+	return parseQueryWithTimeoutOnDone(query, timeout, nil)
+}
+
+// parseQueryWithTimeoutOnDone runs the parse in a goroutine and stops waiting
+// after timeout. onDone, if set, runs inside that goroutine once the parse has
+// finished — including when the caller has already given up — so a caller can
+// hold a resource (a concurrency slot) for the real duration of the work rather
+// than for the duration of its own patience.
+func parseQueryWithTimeoutOnDone(query string, timeout time.Duration, onDone func()) (*parser.QueryInfo, error) {
 	type result struct {
 		info *parser.QueryInfo
 		err  error
 	}
 	ch := make(chan result, 1)
 	go func() {
+		if onDone != nil {
+			defer onDone()
+		}
 		info, err := parser.Parse(query)
 		ch <- result{info, err}
 	}()

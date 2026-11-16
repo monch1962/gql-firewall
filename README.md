@@ -132,6 +132,7 @@ All verified with TDD — tests written first, then defenses implemented.
 | **R97** | **Ambiguous `X-API-Key` headers split identity** (duplicate/folded values, oversized keys, signed claims with hostile tenant IDs) | Exactly one canonical credential accepted; length-capped before MAC work; verified claims pattern-validated | ✅ |
 | **R98** | **Parser nesting bomb runs before policy** (300KB of `{a{a{…` burned 2.4s of CPU; ~900KB got the sidecar OOM-killed before any Rego rule saw the operation) | Pre-parse linear nesting scan (`parser.MaxQueryNestingDepth`, 1024 levels) that mirrors gqlparser's lexer; `400` without touching the upstream or OPA | ✅ |
 | **R99** | **Nesting-limit bypass via lexer desync** (`#` comment terminated by a lone `\r` and block strings closed by a 4+ quote run both made the R98 scan swallow text the lexer still parses, so the bomb reached the recursive descent) | Scan ends literals exactly where `readComment`/`readBlockString` do — control bytes end comments, whole quote runs are consumed; differential test pinned to the lexer's next token, not `Pos.End` | ✅ |
+| **R100** | **Parse concurrency cap refunded its slot on timeout** (a timeout abandons the wait, not the work: the goroutine kept allocating while the freed slot admitted the next slow query, so `--max-concurrent-parses` bounded nothing once one body outlived `--parse-timeout`; reachable because `--max-body-mb` is tunable and `0` = unlimited) | Slot is now released **by the parse goroutine when the work finishes**, making N a true bound on live parses; a recovery test proves the slot is not leaked. Nesting-scan guard upgraded from a fixed table to a seeded structural fuzz + resync cross-product checked against the real lexer | ✅ |
 
 ## CLI Flags
 
@@ -311,7 +312,7 @@ Rules of the model:
 
 ### Security
 - **153 attack vectors covered** (45 OPA Rego + 108 red-team HTTP transport)
-- **Red-team verified** — 162 `TestAttack_*` simulation tests across the Go packages (parser 18, proxy 122, tenant 6, server 15, ratelimit 1) plus 49 Rego policy tests. Real vulnerabilities found and patched across 13 rounds.
+- **Red-team verified** — 166 `TestAttack_*` simulation tests across the Go packages (parser 20, proxy 124, tenant 6, server 15, ratelimit 1) plus 49 Rego policy tests. Real vulnerabilities found and patched across 14 rounds.
 - **Deny-override model** — requests pass by default, blocked only by matching deny rules (safe for phased rollout)
 - **Sensitive field blocking** — SSN, passwords, credit cards, API keys, secrets
 - **Introspection blocking** — direct + nested paths
