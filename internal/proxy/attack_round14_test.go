@@ -8,19 +8,21 @@ import (
 	"time"
 )
 
-// slowValidQuery builds a syntactically valid, schema-free document that takes
-// hundreds of milliseconds to parse: deep-but-admissible nesting (512 levels,
-// well under MaxQueryNestingDepth) plus `mb` megabytes of flat selections.
+// slowValidQuery builds a syntactically valid, schema-free document that is as
+// expensive to parse as the firewall will ever admit: deep-but-admissible
+// nesting (512 levels, well under MaxQueryNestingDepth) plus flat selections up
+// to the MaxQueryNodes budget (~9,500 field nodes, ~19KB).
 //
-// gqlparser's cost is linear in bytes, so this is the payload shape an attacker
-// uses to make one parse outlive ParseTimeout without tripping the R98 nesting
-// scan or any depth rule.
-func slowValidQuery(mb int) string {
+// R101's node budget caps how slow a single parse can be, so this is the new
+// worst case (~8ms measured). That is still several times ParseTimeout below,
+// which is the property these tests need: a parse that outlives the caller's
+// wait without tripping any depth or size rule.
+func slowValidQuery() string {
 	const levels = 512
 	var b strings.Builder
-	b.Grow(mb<<20 + levels*4)
+	b.Grow(levels*4 + 20000)
 	b.WriteString(strings.Repeat("{a", levels))
-	for b.Len() < mb<<20 {
+	for i := 0; i < 9000; i++ {
 		b.WriteString("b ")
 	}
 	b.WriteString(strings.Repeat("}", levels))
@@ -43,7 +45,7 @@ func TestAttack_ParseTimeoutDoesNotRefundPoolSlot(t *testing.T) {
 	h.SetParseConcurrency(1)
 	h.ParseTimeout = time.Millisecond
 
-	slow := slowValidQuery(4) // ~0.5s to parse: ~500x the timeout
+	slow := slowValidQuery() // ~8ms to parse: ~8x the timeout
 
 	// Prove the payload really is slower than the timeout, so the rest of the
 	// test cannot degrade into a flaky no-op on a fast machine.
@@ -51,7 +53,7 @@ func TestAttack_ParseTimeoutDoesNotRefundPoolSlot(t *testing.T) {
 	if _, err := parseQueryWithTimeout(slow, 30*time.Second); err != nil {
 		t.Fatalf("slow payload should parse successfully: %v", err)
 	}
-	if cost := time.Since(t0); cost < 50*time.Millisecond {
+	if cost := time.Since(t0); cost < 3*time.Millisecond {
 		t.Skipf("payload parsed in %s — too fast to exercise the timeout window", cost)
 	}
 
@@ -80,7 +82,7 @@ func TestAttack_ParsePoolRecoversAfterSlowParse(t *testing.T) {
 	h.SetParseConcurrency(1)
 	h.ParseTimeout = time.Millisecond
 
-	if _, err := h.parse(slowValidQuery(2)); err == nil {
+	if _, err := h.parse(slowValidQuery()); err == nil {
 		t.Fatal("expected the slow parse to time out")
 	}
 

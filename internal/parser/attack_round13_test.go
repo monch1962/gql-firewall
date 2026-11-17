@@ -98,7 +98,7 @@ func TestAttack_CommentEndsWhereLexerEnds(t *testing.T) {
 			if got := lexerMaxDepth(t, payload); got <= MaxQueryNestingDepth {
 				t.Fatalf("payload is not a bomb: lexer max depth %d", got)
 			}
-			if err := checkNesting(payload); !errors.Is(err, ErrNestingTooDeep) {
+			if err := scanQuery(payload); !errors.Is(err, ErrNestingTooDeep) {
 				t.Errorf("expected ErrNestingTooDeep for %s-terminated comment, got %v", tc.name, err)
 			}
 		})
@@ -113,7 +113,7 @@ func TestAttack_BlockStringQuoteRunDoesNotDesync(t *testing.T) {
 	if got := lexerMaxDepth(t, payload); got <= MaxQueryNestingDepth {
 		t.Fatalf("payload is not a bomb: lexer max depth %d", got)
 	}
-	if err := checkNesting(payload); !errors.Is(err, ErrNestingTooDeep) {
+	if err := scanQuery(payload); !errors.Is(err, ErrNestingTooDeep) {
 		t.Errorf("expected ErrNestingTooDeep after four-quote block string, got %v", err)
 	}
 }
@@ -145,7 +145,7 @@ func TestAttack_NestingScanAgreesWithLexer(t *testing.T) {
 	for _, tc := range docs {
 		t.Run(tc.name, func(t *testing.T) {
 			want := lexerMaxDepth(t, tc.query)
-			err := checkNesting(tc.query)
+			err := scanQuery(tc.query)
 			switch {
 			case want > MaxQueryNestingDepth && !errors.Is(err, ErrNestingTooDeep):
 				t.Errorf("lexer nests %d deep but scan admitted the document (err=%v)", want, err)

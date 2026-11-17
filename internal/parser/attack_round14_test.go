@@ -43,7 +43,7 @@ func trueMaxDepth(input string) int {
 // is a bypass and must never happen.
 func assertNoBypass(t *testing.T, desc, input string) {
 	t.Helper()
-	if checkNesting(input) != nil {
+	if scanQuery(input) != nil {
 		return
 	}
 	if d := trueMaxDepth(input); d > MaxQueryNestingDepth {

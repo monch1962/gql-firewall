@@ -40,7 +40,7 @@ func TestAttack_NestingScannerIgnoresInertText(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := checkNesting(tc.query); err != nil {
+			if err := scanQuery(tc.query); err != nil {
 				t.Fatalf("inert text wrongly counted as nesting: %v", err)
 			}
 		})
@@ -54,7 +54,7 @@ func TestAttack_NestingScannerIgnoresInertText(t *testing.T) {
 func TestAttack_BlockStringEscapeDoesNotDesynchronise(t *testing.T) {
 	// `\"""` is an escaped triple quote: the block string continues.
 	query := `{ f(a: """pre \""" ` + strings.Repeat("{", 5000) + ` post""") }`
-	if err := checkNesting(query); err != nil {
+	if err := scanQuery(query); err != nil {
 		t.Fatalf("scanner mis-parsed escaped triple quote: %v", err)
 	}
 }
@@ -75,7 +75,7 @@ func TestAttack_MixedDelimiterNestingRejected(t *testing.T) {
 	}
 	b.WriteString(") }")
 
-	if err := checkNesting(b.String()); !errors.Is(err, ErrNestingTooDeep) {
+	if err := scanQuery(b.String()); !errors.Is(err, ErrNestingTooDeep) {
 		t.Fatalf("expected ErrNestingTooDeep for mixed nesting, got %v", err)
 	}
 }
@@ -84,7 +84,7 @@ func TestAttack_MixedDelimiterNestingRejected(t *testing.T) {
 // hand an attacker extra headroom on every subsequent opener.
 func TestAttack_UnbalancedClosersDoNotRefundDepth(t *testing.T) {
 	query := strings.Repeat("}", 100000) + nestedSelection(MaxQueryNestingDepth+50)
-	if err := checkNesting(query); !errors.Is(err, ErrNestingTooDeep) {
+	if err := scanQuery(query); !errors.Is(err, ErrNestingTooDeep) {
 		t.Fatalf("expected ErrNestingTooDeep, got %v", err)
 	}
 }
@@ -154,7 +154,7 @@ func TestAttack_UnterminatedLiteralIsNotNesting(t *testing.T) {
 		"{ f(a: 1) # unterminated comment",
 		"{ f(a: \"\\",
 	} {
-		if err := checkNesting(q); err != nil {
+		if err := scanQuery(q); err != nil {
 			t.Fatalf("unterminated literal wrongly reported as nesting: %v (%q)", err, q)
 		}
 	}
@@ -165,10 +165,10 @@ func TestAttack_NestingScannerBoundIsExact(t *testing.T) {
 	// documented bound, and the rejection must be cheap (a hard-DoS check that
 	// itself costs seconds is not a defence).
 	atLimit := strings.Repeat("{", MaxQueryNestingDepth)
-	if err := checkNesting(atLimit); err != nil {
+	if err := scanQuery(atLimit); err != nil {
 		t.Fatalf("depth %d should be allowed: %v", MaxQueryNestingDepth, err)
 	}
-	if err := checkNesting(atLimit + "{"); !errors.Is(err, ErrNestingTooDeep) {
+	if err := scanQuery(atLimit + "{"); !errors.Is(err, ErrNestingTooDeep) {
 		t.Fatalf("depth %d should be rejected, got %v", MaxQueryNestingDepth+1, err)
 	}
 
@@ -176,7 +176,7 @@ func TestAttack_NestingScannerBoundIsExact(t *testing.T) {
 	// the total payload: stop at the first violation.
 	huge := atLimit + strings.Repeat("{", 4*1024*1024)
 	start := time.Now()
-	if err := checkNesting(huge); !errors.Is(err, ErrNestingTooDeep) {
+	if err := scanQuery(huge); !errors.Is(err, ErrNestingTooDeep) {
 		t.Fatalf("expected rejection of oversized payload, got %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {

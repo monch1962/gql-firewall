@@ -517,3 +517,22 @@ correctly signed claim was trusted to carry any bytes as its tenant ID.
 Previously `TestHeaderResolver_DuplicateHeaderUsesFirst` asserted the
 `Header.Get` behaviour (first value wins), which encoded the vulnerable path;
 it now asserts rejection.
+
+## Rounds 12–15 (Behavioural): Pre-Policy Resource Exhaustion
+
+CAPEC-130 — *Excessive Allocation*. Every rule in the catalog runs on the parsed
+operation, so a document that exhausts stack or heap inside `parser.ParseQuery`
+is never seen by policy at all. Four rounds bound the parser itself, each
+closing a way the previous bound was bypassed or left unbounded.
+
+| ID | Vector | Class | Control | Test file |
+|---|---|---|---|---|
+| R98 | Deep nesting (`{a{a{a…`) burns CPU/stack before any rule | Resource exhaustion | Linear pre-parse nesting scan, 1024 levels, mirrors gqlparser's lexer | internal/parser/attack_round12_test.go, internal/proxy/attack_round12_test.go, internal/parser/nesting_test.go |
+| R99 | Lexer desync hides a nesting bomb from the scan (`#` comment ended by a lone `\r`; block string closed by a 4+ quote run) | Limit evasion | Scan ends literals exactly where `readComment`/`readBlockString` do; differential tests pinned to the lexer's next token (not `Pos.End`) plus a seeded structural fuzz | internal/parser/attack_round13_test.go, internal/proxy/attack_round13_test.go |
+| R100 | Parse-pool slot refunded on caller timeout, so `--max-concurrent-parses` bounded waiters not live work | Resource exhaustion | Slot released by the parse goroutine when the work ends; `503` backpressure instead of queuing | internal/parser/attack_round14_test.go, internal/proxy/attack_round14_test.go |
+| R101 | AST amplification: depth-capped but wide documents (1MB of `{a a a …}` = 524,287 nodes, 147.7MB allocated at depth 1) | Resource exhaustion | `parser.MaxQueryNodes` (10,000 name/number tokens) counted in the same linear scan; aliases and argument values count, string/comment text does not; measured 138µs / 0MB to reject | internal/parser/attack_round15_test.go, internal/proxy/attack_round15_test.go |
+
+**Residual scope:** the node budget is a fixed constant (no flag), so it cannot
+be widened to `unlimited` by misconfiguration; operators who need larger
+documents must raise it in code and re-measure the pool's worst case.
+

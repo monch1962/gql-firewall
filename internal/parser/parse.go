@@ -13,10 +13,10 @@ func parseGraphQL(query string) (*QueryInfo, error) {
 		return nil, fmt.Errorf("empty query")
 	}
 
-	// Bound nesting before the recursive-descent parse: the parse itself is the
-	// allocation amplifier (CAPEC-130). This is a linear scan, so it costs the
-	// attacker nothing more than the bytes they sent.
-	if err := checkNesting(query); err != nil {
+	// Bound nesting AND node count before the recursive-descent parse: the parse
+	// itself is the allocation amplifier (CAPEC-130). This is a linear scan, so
+	// it costs the attacker nothing more than the bytes they sent.
+	if err := scanQuery(query); err != nil {
 		return nil, err
 	}
 
