@@ -134,6 +134,7 @@ All verified with TDD — tests written first, then defenses implemented.
 | **R99** | **Nesting-limit bypass via lexer desync** (`#` comment terminated by a lone `\r` and block strings closed by a 4+ quote run both made the R98 scan swallow text the lexer still parses, so the bomb reached the recursive descent) | Scan ends literals exactly where `readComment`/`readBlockString` do — control bytes end comments, whole quote runs are consumed; differential test pinned to the lexer's next token, not `Pos.End` | ✅ |
 | **R100** | **Parse concurrency cap refunded its slot on timeout** (a timeout abandons the wait, not the work: the goroutine kept allocating while the freed slot admitted the next slow query, so `--max-concurrent-parses` bounded nothing once one body outlived `--parse-timeout`; reachable because `--max-body-mb` is tunable and `0` = unlimited) | Slot is now released **by the parse goroutine when the work finishes**, making N a true bound on live parses; a recovery test proves the slot is not leaked. Nesting-scan guard upgraded from a fixed table to a seeded structural fuzz + resync cross-product checked against the real lexer | ✅ |
 | **R101** | **AST amplification — depth-capped but wide documents** (a 1MB body of `{a a a …}` is 524,287 field nodes, **147.7MB allocated / 123.6MB retained / 177ms** at depth 1, so every depth and cost rule passes it; the 64-slot parse pool reaches ~7.9GB and the sidecar is OOM-killed. The body limit bounds input bytes, not expansion) | Node budget counted in the same linear pre-parse scan as the nesting check (`parser.MaxQueryNodes`, 10,000 name/number tokens ≈ 2.8MB of AST); aliases and argument values count, inert text in strings/comments does not. Measured after: same payload rejected in **138µs with 0MB allocated**, live `400` in 8.8ms with no RSS growth | ✅ |
+| **R102** | **Value-node bomb — string literals were free** (R101 charged name/number tokens and skipped string literals because their *content* is inert; but each literal still materialises an `ast.Value`, so `{a(x:["s" "s" …])}` with 100,000 literals is a 390KB body the scan scored as **2 nodes**. It parsed and allocated **24.5MB** — 10.7× the 10,000-node ceiling, ~63MB per parse at the 1MB body limit, ~4GB across the 64-slot pool) | Every string and block-string literal is charged as one AST node in the same linear pre-parse scan; bytes *inside* the literal stay free, so a single 400KB string argument is still one node and still forwarded. Measured after: a 900KB / 150,000-literal bomb is rejected in **19ms with +5.7MB RSS** (the body copy only), live `400`, batch of 8 rejected at item 0 | ✅ |
 
 ## CLI Flags
 
@@ -312,8 +313,8 @@ Rules of the model:
 - **OPA decision caching** — Avoids redundant OPA calls for repeated query patterns. ~200µs vs ~2ms RPC on cache hit.
 
 ### Security
-- **154 attack vectors covered** (45 OPA Rego + 109 red-team HTTP transport)
-- **Red-team verified** — 174 `TestAttack_*` simulation tests across the Go packages (parser 26, proxy 126, tenant 6, server 15, ratelimit 1) plus 49 Rego policy tests. Real vulnerabilities found and patched across 15 rounds.
+- **155 attack vectors covered** (45 OPA Rego + 110 red-team HTTP transport)
+- **Red-team verified** — 183 `TestAttack_*` simulation tests across the Go packages (parser 32, proxy 129, tenant 6, server 15, ratelimit 1) plus 49 Rego policy tests. Real vulnerabilities found and patched across 16 rounds.
 - **Deny-override model** — requests pass by default, blocked only by matching deny rules (safe for phased rollout)
 - **Sensitive field blocking** — SSN, passwords, credit cards, API keys, secrets
 - **Introspection blocking** — direct + nested paths
@@ -586,10 +587,10 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           457 test functions (557 including subtests)
-              server(46), tenant(26), parser(117), proxy(165), integration(22), opa(63), metrics(11), ratelimit(7)
+Go:           478 test functions (578 including subtests)
+              server(46), tenant(26), parser(131), proxy(172), integration(22), opa(63), metrics(11), ratelimit(7)
 OPA/Rego:     49 tests   — 13 attack categories, edge cases, combined rules, tenant assurance
-Total:        506 test functions (606 including subtests) — all passing
+Total:        527 test functions (627 including subtests) — all passing
 ```
 
 ### Dependency & toolchain hygiene

@@ -19,8 +19,8 @@ import (
 // CAPEC-130: Excessive Allocation.
 const MaxQueryNestingDepth = 1024
 
-// MaxQueryNodes bounds how many name and number tokens the pre-parse scan will
-// admit in one document.
+// MaxQueryNodes bounds how many AST-node-producing tokens the pre-parse scan
+// will admit in one document: name, number, string and block-string literals.
 //
 // Bounding nesting (R98) cut the stack amplifier but not the heap one. gqlparser
 // allocates an AST node per field, alias, enum and value, measured at ~282 bytes
@@ -78,6 +78,14 @@ func scanQueryNodes(query string, maxNodes int) (int, error) {
 	nodes := 0
 	n := len(query)
 
+	// addNode charges one AST node against the budget. It returns true when the
+	// budget is exhausted, so every node-producing branch rejects at the first
+	// violation and cost stays proportional to the bytes up to the limit.
+	addNode := func() bool {
+		nodes++
+		return maxNodes > 0 && nodes > maxNodes
+	}
+
 	for i := 0; i < n; {
 		c := query[i]
 		switch {
@@ -92,6 +100,13 @@ func scanQueryNodes(query string, maxNodes int) (int, error) {
 			}
 
 		case c == '"':
+			// A string or block string is one ast.Value node. Only the bytes
+			// *inside* the literal are inert; the node the lexer emits is not,
+			// so it has to be charged or a list of short literals is a value
+			// bomb that the budget never sees (CAPEC-130).
+			if addNode() {
+				return nodes, fmt.Errorf("%w: more than %d nodes", ErrQueryTooLarge, maxNodes)
+			}
 			i = skipLiteral(query, i)
 
 		case c == '{' || c == '[':
@@ -114,8 +129,7 @@ func scanQueryNodes(query string, maxNodes int) (int, error) {
 			// fragment/type name, or value). Consume the whole run so multi-byte
 			// tokens count once. A '.' inside a float splits the run but only
 			// over-counts, which is the safe direction.
-			nodes++
-			if maxNodes > 0 && nodes > maxNodes {
+			if addNode() {
 				return nodes, fmt.Errorf("%w: more than %d nodes", ErrQueryTooLarge, maxNodes)
 			}
 			i++
