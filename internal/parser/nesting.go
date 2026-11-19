@@ -20,7 +20,9 @@ import (
 const MaxQueryNestingDepth = 1024
 
 // MaxQueryNodes bounds how many AST-node-producing tokens the pre-parse scan
-// will admit in one document: name, number, string and block-string literals.
+// will admit in one document: name, number, string and block-string literals,
+// and one per `{` or `[` container (a selection set, ListValue or ObjectValue
+// is itself a node — charging only the leaves left `[]` and `{}` free, R103).
 //
 // Bounding nesting (R98) cut the stack amplifier but not the heap one. gqlparser
 // allocates an AST node per field, alias, enum and value, measured at ~282 bytes
@@ -78,12 +80,16 @@ func scanQueryNodes(query string, maxNodes int) (int, error) {
 	nodes := 0
 	n := len(query)
 
-	// addNode charges one AST node against the budget. It returns true when the
-	// budget is exhausted, so every node-producing branch rejects at the first
-	// violation and cost stays proportional to the bytes up to the limit.
-	addNode := func() bool {
+	// addNode charges one AST node against the budget and reports the
+	// rejection error when the budget is exhausted, so every node-producing
+	// branch rejects at the first violation and cost stays proportional to the
+	// bytes up to the limit.
+	addNode := func() error {
 		nodes++
-		return maxNodes > 0 && nodes > maxNodes
+		if maxNodes > 0 && nodes > maxNodes {
+			return fmt.Errorf("%w: more than %d nodes", ErrQueryTooLarge, maxNodes)
+		}
+		return nil
 	}
 
 	for i := 0; i < n; {
@@ -104,12 +110,21 @@ func scanQueryNodes(query string, maxNodes int) (int, error) {
 			// *inside* the literal are inert; the node the lexer emits is not,
 			// so it has to be charged or a list of short literals is a value
 			// bomb that the budget never sees (CAPEC-130).
-			if addNode() {
-				return nodes, fmt.Errorf("%w: more than %d nodes", ErrQueryTooLarge, maxNodes)
+			if err := addNode(); err != nil {
+				return nodes, err
 			}
 			i = skipLiteral(query, i)
 
 		case c == '{' || c == '[':
+			// A container is itself an AST node — a selection set, a
+			// ListValue or an ObjectValue. Charging only the tokens inside it
+			// leaves an *empty* container free: `[]` and `{}` are valid
+			// GraphQL values, each materialises a node, and 3 bytes of
+			// payload then buys one node with nothing charged at all
+			// (R103, CAPEC-130). Two charging sites, one budget.
+			if err := addNode(); err != nil {
+				return nodes, err
+			}
 			depth++
 			if depth > MaxQueryNestingDepth {
 				return nodes, fmt.Errorf("%w: more than %d levels", ErrNestingTooDeep, MaxQueryNestingDepth)
@@ -129,8 +144,8 @@ func scanQueryNodes(query string, maxNodes int) (int, error) {
 			// fragment/type name, or value). Consume the whole run so multi-byte
 			// tokens count once. A '.' inside a float splits the run but only
 			// over-counts, which is the safe direction.
-			if addNode() {
-				return nodes, fmt.Errorf("%w: more than %d nodes", ErrQueryTooLarge, maxNodes)
+			if err := addNode(); err != nil {
+				return nodes, err
 			}
 			i++
 			for i < n && (isNameChar(query[i]) || query[i] == '-') {

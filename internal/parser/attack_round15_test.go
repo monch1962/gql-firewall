@@ -141,11 +141,13 @@ func TestAttack_NodeBudgetIgnoresInertText(t *testing.T) {
 
 func TestAttack_NodeBudgetBoundIsExact(t *testing.T) {
 	// Admit everything up to the documented bound; reject the next token.
-	atLimit := flatSelection(MaxQueryNodes)
+	// flatSelection(n) is n field names plus one selection set, and R103
+	// charges the container, so n-1 fields sit exactly on the bound.
+	atLimit := flatSelection(MaxQueryNodes - 1)
 	if _, err := Parse(atLimit); err != nil {
 		t.Fatalf("exactly %d nodes should be allowed: %v", MaxQueryNodes, err)
 	}
-	if _, err := Parse(flatSelection(MaxQueryNodes + 1)); !errors.Is(err, ErrQueryTooLarge) {
+	if _, err := Parse(flatSelection(MaxQueryNodes)); !errors.Is(err, ErrQueryTooLarge) {
 		t.Fatalf("expected rejection at %d nodes, got %v", MaxQueryNodes+1, err)
 	}
 }

@@ -69,12 +69,13 @@ func TestAttack_BlockStringValueBombRejected(t *testing.T) {
 // CAPEC-130: the bound must be exact — a document at the limit parses, the next
 // literal is rejected, so the fix cannot silently halve the useful budget.
 func TestAttack_StringValueBudgetBoundIsExact(t *testing.T) {
-	// `{a(x:[…])}` consumes 2 name tokens (a, x); the rest is literals.
-	atLimit := stringValueBomb(MaxQueryNodes - 2)
+	// `{a(x:[...])}` consumes 4 node tokens — the selection set, `a`, `x` and
+	// the list container (R103 charges containers); the rest is literals.
+	atLimit := stringValueBomb(MaxQueryNodes - 4)
 	if _, err := Parse(atLimit); err != nil {
 		t.Fatalf("exactly %d nodes should be allowed: %v", MaxQueryNodes, err)
 	}
-	if _, err := Parse(stringValueBomb(MaxQueryNodes - 1)); !errors.Is(err, ErrQueryTooLarge) {
+	if _, err := Parse(stringValueBomb(MaxQueryNodes - 3)); !errors.Is(err, ErrQueryTooLarge) {
 		t.Fatalf("expected rejection one literal past the bound, got %v", err)
 	}
 }

@@ -11,18 +11,22 @@ import (
 // slowValidQuery builds a syntactically valid, schema-free document that is as
 // expensive to parse as the firewall will ever admit: deep-but-admissible
 // nesting (512 levels, well under MaxQueryNestingDepth) plus flat selections up
-// to the MaxQueryNodes budget (~9,500 field nodes, ~19KB).
+// to the MaxQueryNodes budget (~8,900 field nodes, ~19KB).
 //
 // R101's node budget caps how slow a single parse can be, so this is the new
 // worst case (~8ms measured). That is still several times ParseTimeout below,
 // which is the property these tests need: a parse that outlives the caller's
 // wait without tripping any depth or size rule.
+//
+// R103 charges container tokens too, so each of the 512 `{a` levels now costs
+// two nodes (the selection set and the field name) instead of one; the flat
+// tail is sized to leave the document just inside the budget.
 func slowValidQuery() string {
 	const levels = 512
 	var b strings.Builder
 	b.Grow(levels*4 + 20000)
 	b.WriteString(strings.Repeat("{a", levels))
-	for i := 0; i < 9000; i++ {
+	for i := 0; i < 8900; i++ {
 		b.WriteString("b ")
 	}
 	b.WriteString(strings.Repeat("}", levels))

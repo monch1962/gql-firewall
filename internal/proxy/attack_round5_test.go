@@ -235,12 +235,17 @@ func TestAttack_RateLimiterConcurrentRace(t *testing.T) {
 	wg.Wait()
 }
 
-// ── R57: Very many fields in a query (10k+) ────────────────────────
+// ── R57: Very many fields in a query ──────────────────────────────
+// The property is that a large-but-admissible field count parses and is fully
+// inspected — there is no separate field-count limit. R103 moved the effective
+// ceiling slightly: the selection set itself is charged as one node, so the
+// admissible field count is MaxQueryNodes-1 rather than MaxQueryNodes.
 func TestAttack_VeryManyFields_Parses(t *testing.T) {
-	// Build a query with 10,000 fields at the root
+	const fields = 9900
+	// Build a query with 9,900 fields at the root
 	var sb strings.Builder
 	sb.WriteString("{ ")
-	for i := 0; i < 10000; i++ {
+	for i := 0; i < fields; i++ {
 		if i > 0 {
 			sb.WriteString(" ")
 		}
@@ -253,11 +258,21 @@ func TestAttack_VeryManyFields_Parses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected many fields to parse, got error: %v", err)
 	}
-	if info.FieldCount < 10000 {
-		t.Errorf("expected field_count >= 10000, got %d", info.FieldCount)
+	if info.FieldCount < fields {
+		t.Errorf("expected field_count >= %d, got %d", fields, info.FieldCount)
 	}
-	if info.FieldCount != 10000 {
-		t.Errorf("expected exactly 10000 fields, got %d", info.FieldCount)
+	if info.FieldCount != fields {
+		t.Errorf("expected exactly %d fields, got %d", fields, info.FieldCount)
+	}
+	// The budget must still bite one field later: MaxQueryNodes is a real cap.
+	var over strings.Builder
+	over.WriteString("{ ")
+	for i := 0; i < parser.MaxQueryNodes; i++ {
+		over.WriteString(fmt.Sprintf("f%d ", i))
+	}
+	over.WriteString(" }")
+	if _, err := parser.Parse(over.String()); err == nil {
+		t.Errorf("expected %d root fields to exceed the node budget", parser.MaxQueryNodes)
 	}
 }
 
