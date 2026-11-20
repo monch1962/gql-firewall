@@ -136,6 +136,7 @@ All verified with TDD — tests written first, then defenses implemented.
 | **R101** | **AST amplification — depth-capped but wide documents** (a 1MB body of `{a a a …}` is 524,287 field nodes, **147.7MB allocated / 123.6MB retained / 177ms** at depth 1, so every depth and cost rule passes it; the 64-slot parse pool reaches ~7.9GB and the sidecar is OOM-killed. The body limit bounds input bytes, not expansion) | Node budget counted in the same linear pre-parse scan as the nesting check (`parser.MaxQueryNodes`, 10,000 name/number tokens ≈ 2.8MB of AST); aliases and argument values count, inert text in strings/comments does not. Measured after: same payload rejected in **138µs with 0MB allocated**, live `400` in 8.8ms with no RSS growth | ✅ |
 | **R102** | **Value-node bomb — string literals were free** (R101 charged name/number tokens and skipped string literals because their *content* is inert; but each literal still materialises an `ast.Value`, so `{a(x:["s" "s" …])}` with 100,000 literals is a 390KB body the scan scored as **2 nodes**. It parsed and allocated **24.5MB** — 10.7× the 10,000-node ceiling, ~63MB per parse at the 1MB body limit, ~4GB across the 64-slot pool) | Every string and block-string literal is charged as one AST node in the same linear pre-parse scan; bytes *inside* the literal stay free, so a single 400KB string argument is still one node and still forwarded. Measured after: a 900KB / 150,000-literal bomb is rejected in **19ms with +5.7MB RSS** (the body copy only), live `400`, batch of 8 rejected at item 0 | ✅ |
 | **R103** | **Empty-container value bomb — `[]` and `{}` were free** (R101/R102 charged names, numbers and literals but left `{` and `[` uncounted, reasoning that only the leaves inside a container cost anything. An *empty* container is still an AST node: `[]` and `{}` are valid GraphQL values, each materialises an `ast.ListValue`/`ast.ObjectValue`, and the scan charged nothing. `{a(x:[[] [] …])}` with 100,000 empty lists is a 300KB depth-1 body scored as **2 nodes** — 3 bytes of payload per AST node, *cheaper* than R102's literal bomb — and it parsed and allocated **31.3MB**, 11× the ceiling; the `{}` spelling gave 15.6MB for 150KB. At the 1MB body limit that is ~100MB per parse, ~6GB across the 64-slot pool) | Container tokens are charged to the same node budget as leaves — one node per `{` or `[` — in the same linear, allocation-free pre-parse scan. Accounting is now exact rather than conservative: `f(x:[1])` is four real AST nodes (field, argument, ListValue, int) and costs four. Measured after: a 300KB / 100,000-container bomb is rejected by the scan with **no parse and no allocation**, live `400` in 4.7ms with the upstream never reached and RSS flat at 29MB; the batch envelope is rejected whole; large-but-admissible documents (2,500 fields, 400KB single string argument) still forward | ✅ |
+| **R104** | **Node budget bound only the paths that had a test** (R101-R103 pinned the budget on the POST body and the batch envelope. The GraphQL-over-HTTP GET branch (`?query=`) reaches the parser by a separate route; with an allowing policy an over-budget GET document would forward to the upstream and expand into a full AST there. Correct today, but unpinned — a refactor dropping the scan on that branch broke nothing in the suite) | The GET branch is pinned to the same budgeted parse by two wire tests: an over-budget GET is rejected `400` with the upstream never reached, and a large-but-admissible GET still forwards. Proven with a build-time overlay that removes the GET parse — the test flips to `200` with the upstream called, so the pin has teeth rather than describing itself | ✅ |
 
 ## CLI Flags
 
@@ -314,8 +315,8 @@ Rules of the model:
 - **OPA decision caching** — Avoids redundant OPA calls for repeated query patterns. ~200µs vs ~2ms RPC on cache hit.
 
 ### Security
-- **156 attack vectors covered** (45 OPA Rego + 111 red-team HTTP transport)
-- **Red-team verified** — 190 `TestAttack_*` simulation tests across the Go packages (parser 36, proxy 132, tenant 6, server 15, ratelimit 1) plus 49 Rego policy tests. Real vulnerabilities found and patched across 17 rounds.
+- **157 attack vectors covered** (45 OPA Rego + 112 red-team HTTP transport)
+- **Red-team verified** — 192 `TestAttack_*` simulation tests across the Go packages (parser 36, proxy 134, tenant 6, server 15, ratelimit 1) plus 49 Rego policy tests. Real vulnerabilities found and patched across 18 rounds.
 - **Deny-override model** — requests pass by default, blocked only by matching deny rules (safe for phased rollout)
 - **Sensitive field blocking** — SSN, passwords, credit cards, API keys, secrets
 - **Introspection blocking** — direct + nested paths
@@ -588,10 +589,10 @@ gql-firewall/
 ## Test Suite
 
 ```
-Go:           485 test functions (585 including subtests)
-              server(46), tenant(26), parser(135), proxy(175), integration(22), opa(63), metrics(11), ratelimit(7)
+Go:           487 test functions (587 including subtests)
+              server(46), tenant(26), parser(135), proxy(177), integration(22), opa(63), metrics(11), ratelimit(7)
 OPA/Rego:     49 tests   — 13 attack categories, edge cases, combined rules, tenant assurance
-Total:        534 test functions (634 including subtests) — all passing
+Total:        536 test functions (636 including subtests) — all passing
 ```
 
 ### Dependency & toolchain hygiene
